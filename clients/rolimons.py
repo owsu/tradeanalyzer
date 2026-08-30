@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Protocol, Sequence
 
 import requests
@@ -14,6 +15,25 @@ class MarketDataError(RuntimeError):
 
 class ItemNotFoundError(KeyError):
     """Raised when an asset ID is not present in the current catalog."""
+
+
+class RolimonsRateLimitError(MarketDataError):
+    def __init__(self, retry_after: float | None = None) -> None:
+        self.retry_after = retry_after
+        super().__init__("Rolimons trade-ad request was rate limited (HTTP 429)")
+
+
+@dataclass(frozen=True)
+class RecentTradeAd:
+    ad_id: int
+    created_at: int
+    user_id: int
+    username: str
+    offer_items: tuple[int, ...]
+    request_items: tuple[int, ...]
+    offer_robux: int
+    request_robux: int
+    request_tags: tuple[int, ...]
 
 
 class TradeAdAutomationGuard(Protocol):
@@ -61,6 +81,50 @@ class RolimonsClient:
         raise MarketDataError(
             "Unable to fetch Rolimons item data. Attempts:\n" + "\n".join(errors)
         )
+
+    def recent_trade_ads(self) -> list[RecentTradeAd]:
+        url = "https://api.rolimons.com/tradeads/v1/getrecentads"
+        try:
+            response = self.session.get(url, timeout=self.timeout)
+        except requests.RequestException as exc:
+            raise MarketDataError(f"Unable to fetch recent trade ads: {exc}") from exc
+        if response.status_code == 429:
+            retry_after = None
+            try:
+                retry_after = max(float(response.headers.get("Retry-After", "")), 0.0)
+            except (TypeError, ValueError):
+                pass
+            raise RolimonsRateLimitError(retry_after)
+        try:
+            response.raise_for_status()
+            payload = response.json()
+        except (requests.RequestException, ValueError) as exc:
+            raise MarketDataError(f"Invalid recent trade-ad response: {exc}") from exc
+        raw_ads = payload.get("trade_ads")
+        if payload.get("success") is not True or not isinstance(raw_ads, list):
+            raise MarketDataError("Recent trade-ad response was unsuccessful or malformed")
+
+        ads: list[RecentTradeAd] = []
+        for raw in raw_ads:
+            try:
+                if not isinstance(raw, list) or len(raw) < 6:
+                    raise ValueError("expected a six-field trade-ad tuple")
+                offer = raw[4] if isinstance(raw[4], dict) else {}
+                request = raw[5] if isinstance(raw[5], dict) else {}
+                ads.append(
+                    RecentTradeAd(
+                        ad_id=int(raw[0]), created_at=int(raw[1]),
+                        user_id=int(raw[2]), username=str(raw[3] or ""),
+                        offer_items=tuple(int(item) for item in offer.get("items", [])),
+                        request_items=tuple(int(item) for item in request.get("items", [])),
+                        offer_robux=max(int(offer.get("robux", 0) or 0), 0),
+                        request_robux=max(int(request.get("robux", 0) or 0), 0),
+                        request_tags=tuple(int(tag) for tag in request.get("tags", [])),
+                    )
+                )
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise MarketDataError(f"Malformed trade ad: {raw!r}") from exc
+        return ads
 
     @staticmethod
     def _optional_positive_int(value: object) -> int | None:

@@ -182,6 +182,33 @@ holding periods, Robux limits, privacy, 2FA, and trade eligibility.
 
 ## Public-inventory trade inference
 
+### Permissioned Rolimon's trade-ad discovery
+
+When authorized to use Rolimon's bot API, run its recent-ad collector as an
+independent process:
+
+```powershell
+python -m scripts.collect_trade_ads
+```
+
+Use `--once` for a single diagnostic request. The collector polls the official
+recent-ad endpoint every 30 seconds by default, permanently deduplicates by ad
+ID, records each advertiser and offered/requested asset, and pushes eligible
+advertisers into the bounded inventory queue. A repeat advertiser is promoted
+at most once per `ROLIMONS_TRADE_AD_REPROMOTE_SECONDS`, preventing frequent ads
+from forcing repeated inventory requests. Offered assets receive higher sweep
+priority than requested assets because the advertiser is more likely to own
+them. Trade ads identify assets, not UAIDs; positive Roblox inventory and owner
+observations remain required, and reciprocal movement is still mandatory before
+classifying a swap.
+
+Advertiser polling cools automatically with inactivity: 30 minutes for ads in
+the last 6 hours, 6 hours through day 3, daily through day 30, and weekly through
+day 365. After 365 days the user is disabled from automatic polling, while all
+ads, inventory observations, and ownership history remain stored. Any new ad
+immediately re-enables and promotes that user. These windows and intervals are
+configurable with the `TRADE_AD_*` environment settings.
+
 Add public users and run one collection/correlation cycle:
 
 ```powershell
@@ -201,7 +228,11 @@ Refresh value, demand, and trend metadata without starting owner requests:
 python -m scripts.infer_trades --sync-catalog-only
 ```
 
-Active proof/transfer users are polled first. Owner pages then use two durable
+Active proof/transfer users are polled first through a persistent, bounded
+queue. Each cycle polls at most `WATCHED_USER_POLL_BUDGET` due users, spaces
+requests by `WATCHED_USER_REQUEST_DELAY_SECONDS`, and schedules successful
+users for a later refresh. A priority boost is consumed after one attempt so
+the remaining users continue rotating fairly. Owner pages then use two durable
 lanes: six pages for proof/transfer-priority assets and four pages for a fair
 background baseline by default. Each request advances exactly one saved cursor,
 then rotates to another due asset so high-value, many-page items cannot starve

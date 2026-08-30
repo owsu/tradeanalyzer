@@ -1,0 +1,47 @@
+from __future__ import annotations
+
+import argparse
+import json
+import time
+
+from clients.rolimons import MarketDataError, RolimonsClient, RolimonsRateLimitError
+from config import (
+    DATABASE_PATH,
+    INVENTORY_REQUEST_TIMEOUT,
+    ROLIMONS_TRADE_AD_ASSET_PRIORITY_SECONDS,
+    ROLIMONS_TRADE_AD_ERROR_RETRY_SECONDS,
+    ROLIMONS_TRADE_AD_POLL_SECONDS,
+    ROLIMONS_TRADE_AD_REPROMOTE_SECONDS,
+)
+from database import Database
+from market.trade_ad_collector import TradeAdCollector
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Collect permissioned Rolimon's trade ads")
+    parser.add_argument("--once", action="store_true")
+    args = parser.parse_args()
+
+    collector = TradeAdCollector(
+        Database(DATABASE_PATH),
+        RolimonsClient(auto_refresh=False, timeout=INVENTORY_REQUEST_TIMEOUT),
+        repromote_seconds=ROLIMONS_TRADE_AD_REPROMOTE_SECONDS,
+        asset_priority_seconds=ROLIMONS_TRADE_AD_ASSET_PRIORITY_SECONDS,
+    )
+    while True:
+        delay = ROLIMONS_TRADE_AD_POLL_SECONDS
+        try:
+            print(json.dumps(collector.collect(), indent=2), flush=True)
+        except RolimonsRateLimitError as exc:
+            delay = max(exc.retry_after or ROLIMONS_TRADE_AD_ERROR_RETRY_SECONDS, delay)
+            print(json.dumps({"error": str(exc), "retry_after_seconds": delay}), flush=True)
+        except MarketDataError as exc:
+            delay = max(ROLIMONS_TRADE_AD_ERROR_RETRY_SECONDS, delay)
+            print(json.dumps({"error": str(exc), "retry_after_seconds": delay}), flush=True)
+        if args.once:
+            return
+        time.sleep(max(delay, 5))
+
+
+if __name__ == "__main__":
+    main()

@@ -19,6 +19,18 @@ from config import (
     OWNER_SWEEP_REQUEST_DELAY_SECONDS,
     PROOF_TRADE_LINK_WINDOW_DAYS,
     ROBLOX_SECURITY_COOKIE,
+    WATCHED_USER_POLL_BUDGET,
+    WATCHED_USER_REQUEST_DELAY_SECONDS,
+    WATCHED_USER_POLL_INTERVAL_SECONDS,
+    WATCHED_USER_FAILURE_RETRY_SECONDS,
+    TRADE_AD_HOT_WINDOW_SECONDS,
+    TRADE_AD_HOT_POLL_SECONDS,
+    TRADE_AD_WARM_WINDOW_SECONDS,
+    TRADE_AD_WARM_POLL_SECONDS,
+    TRADE_AD_ACTIVE_WINDOW_SECONDS,
+    TRADE_AD_ACTIVE_POLL_SECONDS,
+    TRADE_AD_COLD_POLL_SECONDS,
+    TRADE_AD_ARCHIVE_AFTER_DAYS,
 )
 from clients.rolimons import RolimonsClient
 from database import Database
@@ -58,6 +70,18 @@ def run_cycle(database: Database) -> dict:
     collector = InventoryCollector(
         database,
         inventory_client,
+        poll_budget=WATCHED_USER_POLL_BUDGET,
+        request_delay_seconds=WATCHED_USER_REQUEST_DELAY_SECONDS,
+        user_poll_interval_seconds=WATCHED_USER_POLL_INTERVAL_SECONDS,
+        failure_retry_seconds=WATCHED_USER_FAILURE_RETRY_SECONDS,
+        trade_ad_hot_window_seconds=TRADE_AD_HOT_WINDOW_SECONDS,
+        trade_ad_hot_poll_seconds=TRADE_AD_HOT_POLL_SECONDS,
+        trade_ad_warm_window_seconds=TRADE_AD_WARM_WINDOW_SECONDS,
+        trade_ad_warm_poll_seconds=TRADE_AD_WARM_POLL_SECONDS,
+        trade_ad_active_window_seconds=TRADE_AD_ACTIVE_WINDOW_SECONDS,
+        trade_ad_active_poll_seconds=TRADE_AD_ACTIVE_POLL_SECONDS,
+        trade_ad_cold_poll_seconds=TRADE_AD_COLD_POLL_SECONDS,
+        trade_ad_archive_after_days=TRADE_AD_ARCHIVE_AFTER_DAYS,
     )
     polls = collector.poll_watched_users()
     owner_sweep = OwnerSweeper(

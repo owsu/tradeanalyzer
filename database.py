@@ -96,8 +96,35 @@ class Database:
                     enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
                     added_at TEXT NOT NULL,
                     last_polled_at TEXT,
-                    inventory_public INTEGER
+                    inventory_public INTEGER,
+                    next_poll_at TEXT,
+                    poll_priority INTEGER NOT NULL DEFAULT 0,
+                    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+                    username TEXT,
+                    last_trade_ad_at TEXT
                 );
+                CREATE TABLE IF NOT EXISTS rolimons_trade_ads (
+                    ad_id INTEGER PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    username TEXT NOT NULL,
+                    offer_robux INTEGER NOT NULL DEFAULT 0,
+                    request_robux INTEGER NOT NULL DEFAULT 0,
+                    request_tags TEXT NOT NULL DEFAULT '[]',
+                    first_seen_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS rolimons_trade_ads_user_time
+                    ON rolimons_trade_ads(user_id, created_at);
+                CREATE TABLE IF NOT EXISTS rolimons_trade_ad_items (
+                    ad_id INTEGER NOT NULL,
+                    side TEXT NOT NULL CHECK(side IN ('offer', 'request')),
+                    position INTEGER NOT NULL,
+                    asset_id INTEGER NOT NULL,
+                    PRIMARY KEY(ad_id, side, position),
+                    FOREIGN KEY(ad_id) REFERENCES rolimons_trade_ads(ad_id)
+                );
+                CREATE INDEX IF NOT EXISTS rolimons_trade_ad_items_asset
+                    ON rolimons_trade_ad_items(asset_id, side);
                 CREATE TABLE IF NOT EXISTS tracked_assets (
                     asset_id INTEGER PRIMARY KEY,
                     name TEXT NOT NULL,
@@ -216,6 +243,11 @@ class Database:
             self._ensure_column(
                 connection, "watched_users", "last_premium_checked_at", "TEXT"
             )
+            self._ensure_column(connection, "watched_users", "next_poll_at", "TEXT")
+            self._ensure_column(connection, "watched_users", "poll_priority", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "watched_users", "consecutive_failures", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "watched_users", "username", "TEXT")
+            self._ensure_column(connection, "watched_users", "last_trade_ad_at", "TEXT")
             self._ensure_column(
                 connection,
                 "item_value_observations",
@@ -279,6 +311,9 @@ class Database:
             )
             connection.execute(
                 "INSERT OR IGNORE INTO market_scheduler_state(singleton_id) VALUES (1)"
+            )
+            connection.execute(
+                "UPDATE watched_users SET next_poll_at=COALESCE(next_poll_at, added_at)"
             )
             connection.commit()
 
@@ -1011,6 +1046,30 @@ class Database:
                 "watched_users": count(
                     "SELECT COUNT(user_id) FROM watched_users WHERE enabled=1"
                 ),
+                "watched_users_due": count(
+                    """SELECT COUNT(user_id) FROM watched_users
+                       WHERE enabled=1 AND COALESCE(next_poll_at, added_at)<=?""",
+                    (datetime.now(UTC).isoformat(),),
+                ),
+                "rolimons_trade_ads": count(
+                    "SELECT COUNT(ad_id) FROM rolimons_trade_ads"
+                ),
+                "rolimons_trade_advertisers": count(
+                    "SELECT COUNT(DISTINCT user_id) FROM rolimons_trade_ads"
+                ),
+                "active_trade_ad_users": count(
+                    "SELECT COUNT(user_id) FROM watched_users WHERE enabled=1 AND last_trade_ad_at IS NOT NULL"
+                ),
+                "archived_trade_ad_users": count(
+                    "SELECT COUNT(user_id) FROM watched_users WHERE enabled=0 AND last_trade_ad_at IS NOT NULL"
+                ),
+                "rolimons_trade_ads_24h": count(
+                    "SELECT COUNT(ad_id) FROM rolimons_trade_ads WHERE created_at>=?",
+                    ((datetime.now(UTC) - timedelta(days=1)).isoformat(),),
+                ),
+                "rolimons_advertised_assets": count(
+                    "SELECT COUNT(DISTINCT asset_id) FROM rolimons_trade_ad_items"
+                ),
                 "ownership_transfers": count(
                     "SELECT COUNT(id) FROM ownership_transfers"
                 ),
@@ -1110,14 +1169,116 @@ class Database:
         with self.connect() as connection:
             connection.execute(
                 """
-                INSERT INTO watched_users (user_id, source, enabled, added_at)
-                VALUES (?, ?, 1, ?)
+                INSERT INTO watched_users
+                    (user_id, source, enabled, added_at, next_poll_at, poll_priority)
+                VALUES (?, ?, 1, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
-                    source = excluded.source, enabled = 1
+                    source = excluded.source, enabled = 1,
+                    poll_priority=MAX(watched_users.poll_priority, excluded.poll_priority),
+                    next_poll_at=MIN(COALESCE(watched_users.next_poll_at, excluded.next_poll_at), excluded.next_poll_at)
                 """,
-                (user_id, source[:100], datetime.now(UTC).isoformat()),
+                (user_id, source[:100], datetime.now(UTC).isoformat(),
+                 datetime.now(UTC).isoformat(), self._watched_user_priority(source)),
             )
             connection.commit()
+
+    @staticmethod
+    def _watched_user_priority(source: str) -> int:
+        if source == "active_transfer":
+            return 200
+        if source == "trade_ad":
+            return 150
+        if source == "proof":
+            return 100
+        if source == "manual" or source == "cli":
+            return 75
+        return 0
+
+    def ingest_rolimons_trade_ads(
+        self, ads, *, repromote_seconds: int = 1800,
+        asset_priority_seconds: int = 21600,
+    ) -> dict:
+        now = datetime.now(UTC)
+        now_text = now.isoformat()
+        priority_until = (now + timedelta(seconds=max(asset_priority_seconds, 1))).isoformat()
+        repromote_before = (now - timedelta(seconds=max(repromote_seconds, 1))).isoformat()
+        new_ads = 0
+        advertisers: set[int] = set()
+        offered_assets: set[int] = set()
+        requested_assets: set[int] = set()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for ad in ads:
+                created_at = datetime.fromtimestamp(int(ad.created_at), UTC)
+                created_text = created_at.isoformat()
+                inserted = connection.execute(
+                    """
+                    INSERT OR IGNORE INTO rolimons_trade_ads (
+                        ad_id, created_at, user_id, username, offer_robux,
+                        request_robux, request_tags, first_seen_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (int(ad.ad_id), created_text, int(ad.user_id), ad.username[:100],
+                     int(ad.offer_robux), int(ad.request_robux),
+                     json.dumps(list(ad.request_tags)), now_text),
+                )
+                if not inserted.rowcount:
+                    continue
+                new_ads += 1
+                advertisers.add(int(ad.user_id))
+                current = connection.execute(
+                    "SELECT last_polled_at FROM watched_users WHERE user_id=?",
+                    (int(ad.user_id),),
+                ).fetchone()
+                should_promote = current is None or not current["last_polled_at"] or current["last_polled_at"] <= repromote_before
+                connection.execute(
+                    """
+                    INSERT INTO watched_users (
+                        user_id, source, enabled, added_at, next_poll_at,
+                        poll_priority, username, last_trade_ad_at
+                    ) VALUES (?, 'trade_ad', 1, ?, ?, ?, ?, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        source=CASE WHEN watched_users.source='active_transfer'
+                                    THEN watched_users.source ELSE 'trade_ad' END,
+                        enabled=1, username=excluded.username,
+                        last_trade_ad_at=MAX(COALESCE(watched_users.last_trade_ad_at, excluded.last_trade_ad_at), excluded.last_trade_ad_at),
+                        poll_priority=MAX(watched_users.poll_priority, excluded.poll_priority),
+                        next_poll_at=CASE WHEN excluded.poll_priority>0 THEN
+                            MIN(COALESCE(watched_users.next_poll_at, excluded.next_poll_at), excluded.next_poll_at)
+                            ELSE watched_users.next_poll_at END
+                    """,
+                    (int(ad.user_id), now_text, now_text,
+                     150 if should_promote else 0, ad.username[:100], created_text),
+                )
+                for side, items, score in (
+                    ("offer", ad.offer_items, 150),
+                    ("request", ad.request_items, 90),
+                ):
+                    for position, asset_id in enumerate(items):
+                        asset_id = int(asset_id)
+                        connection.execute(
+                            """INSERT INTO rolimons_trade_ad_items
+                               (ad_id, side, position, asset_id) VALUES (?, ?, ?, ?)""",
+                            (int(ad.ad_id), side, position, asset_id),
+                        )
+                        (offered_assets if side == "offer" else requested_assets).add(asset_id)
+                        connection.execute(
+                            """
+                            UPDATE tracked_assets SET
+                                priority_score=MAX(priority_score, ?),
+                                priority_reason='trade_ad', priority_until=?,
+                                next_sweep_at=MIN(next_sweep_at, ?)
+                            WHERE asset_id=?
+                            """,
+                            (score, priority_until, now_text, asset_id),
+                        )
+            connection.commit()
+        return {
+            "received_ads": len(ads), "new_ads": new_ads,
+            "new_advertisers": len(advertisers),
+            "offered_assets": len(offered_assets),
+            "requested_assets": len(requested_assets),
+        }
 
     def watched_user_ids(self) -> list[int]:
         with self.connect() as connection:
@@ -1125,6 +1286,85 @@ class Database:
                 "SELECT user_id FROM watched_users WHERE enabled = 1 ORDER BY user_id"
             ).fetchall()
         return [int(row["user_id"]) for row in rows]
+
+    def due_watched_user_ids(self, limit: int) -> list[int]:
+        if int(limit) <= 0:
+            return []
+        now = datetime.now(UTC).isoformat()
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT user_id FROM watched_users
+                WHERE enabled=1 AND COALESCE(next_poll_at, added_at) <= ?
+                ORDER BY poll_priority DESC, COALESCE(next_poll_at, added_at) ASC,
+                         user_id ASC
+                LIMIT ?
+                """,
+                (now, int(limit)),
+            ).fetchall()
+        return [int(row["user_id"]) for row in rows]
+
+    def archive_inactive_trade_ad_users(self, inactive_days: int = 365) -> int:
+        """Disable polling only; ad, inventory, and ownership history is retained."""
+        cutoff = (datetime.now(UTC) - timedelta(days=max(int(inactive_days), 1))).isoformat()
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE watched_users SET enabled=0, poll_priority=0
+                WHERE enabled=1 AND source='trade_ad'
+                  AND last_trade_ad_at IS NOT NULL AND last_trade_ad_at < ?
+                """,
+                (cutoff,),
+            )
+            connection.commit()
+        return int(cursor.rowcount)
+
+    def recommended_watched_user_delay(
+        self, user_id: int, *, default_seconds: int,
+        hot_window_seconds: int, hot_interval_seconds: int,
+        warm_window_seconds: int, warm_interval_seconds: int,
+        active_window_seconds: int, active_interval_seconds: int,
+        cold_interval_seconds: int,
+    ) -> int:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT source, last_trade_ad_at FROM watched_users WHERE user_id=?",
+                (int(user_id),),
+            ).fetchone()
+        if row is None or not row["last_trade_ad_at"]:
+            return max(int(default_seconds), 1)
+        # A positively observed transfer is a stronger and more recent signal
+        # than an older ad, so keep it on the normal active-user cadence.
+        if row["source"] == "active_transfer":
+            return max(int(default_seconds), 1)
+        age = max(
+            (datetime.now(UTC) - datetime.fromisoformat(row["last_trade_ad_at"])).total_seconds(),
+            0,
+        )
+        if age <= hot_window_seconds:
+            return max(int(hot_interval_seconds), 1)
+        if age <= warm_window_seconds:
+            return max(int(warm_interval_seconds), 1)
+        if age <= active_window_seconds:
+            return max(int(active_interval_seconds), 1)
+        return max(int(cold_interval_seconds), 1)
+
+    def schedule_next_user_poll(
+        self, user_id: int, observed_at: datetime, *, delay_seconds: float,
+        succeeded: bool,
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE watched_users SET next_poll_at=?,
+                    consecutive_failures=CASE WHEN ? THEN 0 ELSE consecutive_failures+1 END,
+                    poll_priority=0
+                WHERE user_id=?
+                """,
+                ((observed_at + timedelta(seconds=max(float(delay_seconds), 1))).isoformat(),
+                 int(succeeded), int(user_id)),
+            )
+            connection.commit()
 
     def update_premium_status(self, user_id: int, premium: bool) -> None:
         with self.connect() as connection:
@@ -1393,12 +1633,17 @@ class Database:
                     )
                     connection.execute(
                         """
-                        INSERT INTO watched_users (user_id, source, enabled, added_at)
-                        VALUES (?, 'active_transfer', 1, ?)
+                        INSERT INTO watched_users
+                            (user_id, source, enabled, added_at, next_poll_at, poll_priority)
+                        VALUES (?, 'active_transfer', 1, ?, ?, 200)
                         ON CONFLICT(user_id) DO UPDATE SET
-                            source = 'active_transfer', enabled = 1
+                            source = 'active_transfer', enabled = 1,
+                            poll_priority=200, next_poll_at=MIN(
+                                COALESCE(watched_users.next_poll_at, excluded.next_poll_at),
+                                excluded.next_poll_at
+                            )
                         """,
-                        (existing["current_owner_id"], observed_text),
+                        (existing["current_owner_id"], observed_text, observed_text),
                     )
                     connection.execute(
                         """
@@ -1425,7 +1670,12 @@ class Database:
                         source = CASE
                             WHEN excluded.enabled = 1 THEN excluded.source
                             ELSE watched_users.source
-                        END
+                        END,
+                        poll_priority = CASE WHEN excluded.enabled=1 THEN 200
+                                             ELSE watched_users.poll_priority END,
+                        next_poll_at = CASE WHEN excluded.enabled=1 THEN
+                            MIN(COALESCE(watched_users.next_poll_at, excluded.added_at), excluded.added_at)
+                            ELSE watched_users.next_poll_at END
                     """,
                     (
                         owner.owner_id,

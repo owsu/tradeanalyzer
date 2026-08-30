@@ -10,10 +10,59 @@ from market.inventory_client import (
     RobloxInventoryClient,
 )
 from market.owner_sweeper import OwnerSweeper
+from market.collector import InventoryCollector
 
 
 def collectible(uaid, asset_id, rap=1000):
     return CollectibleInstance(uaid=uaid, asset_id=asset_id, name="Item", rap=rap)
+
+
+def test_watched_user_polling_is_budgeted_and_rotates(tmp_path):
+    database = Database(tmp_path / "market.db")
+    for user_id in (1, 2, 3):
+        database.add_watched_user(user_id)
+
+    class Client:
+        calls = []
+
+        def collectible_inventory(self, user_id):
+            self.calls.append(user_id)
+            return []
+
+        def premium_status(self, user_id):
+            return None
+
+    client = Client()
+    results = InventoryCollector(
+        database, client, poll_budget=2, request_delay_seconds=0,
+        user_poll_interval_seconds=1800,
+    ).poll_watched_users()
+
+    assert [result["user_id"] for result in results] == [1, 2]
+    assert database.due_watched_user_ids(10) == [3]
+
+
+def test_watched_user_polling_stops_on_first_rate_limit(tmp_path):
+    database = Database(tmp_path / "market.db")
+    for user_id in (1, 2, 3):
+        database.add_watched_user(user_id)
+
+    class Client:
+        calls = []
+
+        def collectible_inventory(self, user_id):
+            self.calls.append(user_id)
+            raise InventoryRateLimitError(5, operation="Inventory")
+
+    client = Client()
+    results = InventoryCollector(
+        database, client, poll_budget=3, request_delay_seconds=0,
+    ).poll_watched_users()
+
+    assert client.calls == [1]
+    assert len(results) == 1
+    assert "429" in results[0]["error"]
+    assert database.scheduler_cooldown() is not None
 
 
 def test_one_way_ownership_change_is_not_inferred_as_trade(tmp_path):
