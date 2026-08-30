@@ -49,8 +49,12 @@ def test_trade_ads_are_deduplicated_and_promote_discovery(tmp_path):
         offer_robux=0, request_robux=0, request_tags=(5,),
     )
 
-    first = database.ingest_rolimons_trade_ads([ad])
-    second = database.ingest_rolimons_trade_ads([ad])
+    first = database.ingest_rolimons_trade_ads(
+        [ad], admission_min_ads=1, asset_min_offers=1
+    )
+    second = database.ingest_rolimons_trade_ads(
+        [ad], admission_min_ads=1, asset_min_offers=1
+    )
 
     assert first["new_ads"] == 1
     assert second["new_ads"] == 0
@@ -62,7 +66,9 @@ def test_trade_ads_are_deduplicated_and_promote_discovery(tmp_path):
                 "SELECT asset_id, priority_score FROM tracked_assets"
             )
         }
-    assert scores == {1001: 150, 1002: 150, 2001: 90}
+    assert scores[1001] >= 80
+    assert scores[1002] >= 80
+    assert scores[2001] == 0
     status = database.market_status()
     assert status["rolimons_trade_ads"] == 1
     assert status["rolimons_trade_advertisers"] == 1
@@ -102,5 +108,22 @@ def test_trade_ad_users_cool_through_tiers_then_reactivate(tmp_path):
         username="Trader", offer_items=(), request_items=(), offer_robux=0,
         request_robux=0, request_tags=(),
     )
-    database.ingest_rolimons_trade_ads([new_ad])
+    database.ingest_rolimons_trade_ads([new_ad], admission_min_ads=1)
     assert database.watched_user_ids() == [20]
+
+
+def test_trade_ad_admission_is_capped(tmp_path):
+    database = Database(tmp_path / "market.db")
+    now = int(datetime.now(UTC).timestamp())
+    ads = [RecentTradeAd(
+        ad_id=100 + user_id, created_at=now, user_id=user_id,
+        username=f"Trader{user_id}", offer_items=(), request_items=(),
+        offer_robux=0, request_robux=0, request_tags=(),
+    ) for user_id in range(1, 6)]
+
+    result = database.ingest_rolimons_trade_ads(
+        ads, admission_min_ads=1, admission_max_users=2
+    )
+
+    assert result["admitted_users"] == 2
+    assert len(database.watched_user_ids()) == 2

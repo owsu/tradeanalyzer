@@ -6,6 +6,9 @@ from config import (
     ESTIMATED_VALUES,
     LEARNED_VALUE_MAX_AGE_DAYS,
     LEARNED_VALUE_MIN_PROOFS,
+    LEARNED_VALUE_RECENCY_HALF_LIFE_DAYS,
+    LEARNED_VALUE_PROOF_EXECUTABILITY_WEIGHT,
+    LEARNED_VALUE_VERIFIED_EXECUTABILITY_WEIGHT,
     UNRATED_DEMAND_BASELINE,
 )
 from models import EvaluatedItem, ItemSnapshot, TradeEvaluation, TradeSideSummary
@@ -19,7 +22,9 @@ class MarketClient(Protocol):
 
 class LearnedValueProvider(Protocol):
     def learned_item_value(
-        self, asset_id: int, *, min_proofs: int, max_age_days: int
+        self, asset_id: int, *, min_proofs: int, max_age_days: int,
+        recency_half_life_days: float, proof_executability_weight: float,
+        verified_executability_weight: float,
     ) -> dict | None: ...
 
 
@@ -60,6 +65,9 @@ class TradeEvaluator:
                 asset_id,
                 min_proofs=LEARNED_VALUE_MIN_PROOFS,
                 max_age_days=LEARNED_VALUE_MAX_AGE_DAYS,
+                recency_half_life_days=LEARNED_VALUE_RECENCY_HALF_LIFE_DAYS,
+                proof_executability_weight=LEARNED_VALUE_PROOF_EXECUTABILITY_WEIGHT,
+                verified_executability_weight=LEARNED_VALUE_VERIFIED_EXECUTABILITY_WEIGHT,
             )
         ) is not None:
             effective_value = int(learned["value"])

@@ -367,6 +367,40 @@ def test_learned_value_requires_distinct_proof_content(tmp_path):
     assert estimate["source"] == "direct implied trades"
 
 
+def test_proof_showcase_value_is_recency_weighted_and_bias_adjusted(tmp_path):
+    database = Database(tmp_path / "market.db")
+    database.upsert_tracked_asset(
+        1001, name="Target", market_value=10_000, interval_seconds=600
+    )
+    now = datetime.now(UTC)
+    for message_id, age_days, amount in (
+        ("old-1", 60, 4_000),
+        ("old-2", 55, 4_000),
+        ("recent", 0, 2_000),
+    ):
+        raw = RawProof(
+            source="discord_bot", channel_id="proofs", message_id=message_id,
+            timestamp=now - timedelta(days=age_days),
+        )
+        database.claim_proof_message(
+            raw, message_id, max_attempts=3, processing_timeout_seconds=600
+        )
+        database.complete_proof_message(raw, {
+            "giving": [{"name": "Target", "asset_id": 1001, "market_value": 10_000}],
+            "receiving": [{"name": "Payment", "asset_id": 2001, "market_value": 10_000}],
+            "deal_type": "overpay", "deal_amount": amount,
+            "deal_item": "Target", "valid": True,
+        })
+
+    estimate = database.learned_item_value(
+        1001, min_proofs=3, max_age_days=90, recency_half_life_days=14,
+        proof_executability_weight=0.5,
+    )
+    assert estimate["showcase_value"] == 12_000
+    assert estimate["value"] == 11_000
+    assert estimate["selection_bias_adjustment"] == -1_000
+
+
 def test_overpay_and_underpay_create_signed_implied_values(tmp_path):
     database = Database(tmp_path / "market.db")
     database.upsert_tracked_asset(

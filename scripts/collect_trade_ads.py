@@ -12,6 +12,12 @@ from config import (
     ROLIMONS_TRADE_AD_ERROR_RETRY_SECONDS,
     ROLIMONS_TRADE_AD_POLL_SECONDS,
     ROLIMONS_TRADE_AD_REPROMOTE_SECONDS,
+    ROLIMONS_TRADE_AD_ADMISSION_WINDOW_SECONDS,
+    ROLIMONS_TRADE_AD_ADMISSION_MIN_ADS,
+    ROLIMONS_TRADE_AD_ADMISSION_MIN_OFFER_VALUE,
+    ROLIMONS_TRADE_AD_ADMISSION_MAX_USERS,
+    ROLIMONS_TRADE_AD_ASSET_MIN_OFFERS,
+    ROLIMONS_TRADE_AD_MAX_PRIORITY_ASSETS,
 )
 from database import Database
 from market.trade_ad_collector import TradeAdCollector
@@ -27,6 +33,12 @@ def main() -> None:
         RolimonsClient(auto_refresh=False, timeout=INVENTORY_REQUEST_TIMEOUT),
         repromote_seconds=ROLIMONS_TRADE_AD_REPROMOTE_SECONDS,
         asset_priority_seconds=ROLIMONS_TRADE_AD_ASSET_PRIORITY_SECONDS,
+        admission_window_seconds=ROLIMONS_TRADE_AD_ADMISSION_WINDOW_SECONDS,
+        admission_min_ads=ROLIMONS_TRADE_AD_ADMISSION_MIN_ADS,
+        admission_min_offer_value=ROLIMONS_TRADE_AD_ADMISSION_MIN_OFFER_VALUE,
+        admission_max_users=ROLIMONS_TRADE_AD_ADMISSION_MAX_USERS,
+        asset_min_offers=ROLIMONS_TRADE_AD_ASSET_MIN_OFFERS,
+        asset_max_priority=ROLIMONS_TRADE_AD_MAX_PRIORITY_ASSETS,
     )
     while True:
         delay = ROLIMONS_TRADE_AD_POLL_SECONDS

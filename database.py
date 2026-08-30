@@ -101,7 +101,9 @@ class Database:
                     poll_priority INTEGER NOT NULL DEFAULT 0,
                     consecutive_failures INTEGER NOT NULL DEFAULT 0,
                     username TEXT,
-                    last_trade_ad_at TEXT
+                    last_trade_ad_at TEXT,
+                    trade_ad_admitted INTEGER NOT NULL DEFAULT 0,
+                    trade_ad_score REAL NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS rolimons_trade_ads (
                     ad_id INTEGER PRIMARY KEY,
@@ -115,6 +117,8 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS rolimons_trade_ads_user_time
                     ON rolimons_trade_ads(user_id, created_at);
+                CREATE INDEX IF NOT EXISTS rolimons_trade_ads_created
+                    ON rolimons_trade_ads(created_at);
                 CREATE TABLE IF NOT EXISTS rolimons_trade_ad_items (
                     ad_id INTEGER NOT NULL,
                     side TEXT NOT NULL CHECK(side IN ('offer', 'request')),
@@ -248,6 +252,8 @@ class Database:
             self._ensure_column(connection, "watched_users", "consecutive_failures", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "watched_users", "username", "TEXT")
             self._ensure_column(connection, "watched_users", "last_trade_ad_at", "TEXT")
+            self._ensure_column(connection, "watched_users", "trade_ad_admitted", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "watched_users", "trade_ad_score", "REAL NOT NULL DEFAULT 0")
             self._ensure_column(
                 connection,
                 "item_value_observations",
@@ -793,7 +799,10 @@ class Database:
         return linked
 
     def learned_item_value(
-        self, asset_id: int, *, min_proofs: int = 3, max_age_days: int = 90
+        self, asset_id: int, *, min_proofs: int = 3, max_age_days: int = 90,
+        recency_half_life_days: float = 14,
+        proof_executability_weight: float = 0.50,
+        verified_executability_weight: float = 0.85,
     ) -> dict | None:
         """Estimate latent value from direct concessions and similar-value peers."""
         cutoff = datetime.now(UTC) - timedelta(days=max_age_days)
@@ -814,7 +823,8 @@ class Database:
                 """
                 SELECT o.observed_value, o.baseline_value, o.raw_adjustment,
                        o.structural_compensation, o.largest_payment_ratio,
-                       o.confidence, o.observed_at, p.content_hash
+                       o.confidence, o.observed_at, o.inferred_trade_id,
+                       p.content_hash
                 FROM item_value_observations o
                 JOIN proof_messages p
                   ON p.source=o.proof_source
@@ -830,7 +840,7 @@ class Database:
                 """
                 SELECT o.asset_id, o.observed_value, o.baseline_value,
                        o.confidence, o.observed_at, p.content_hash,
-                       a.demand_score, a.trend_score
+                       o.inferred_trade_id, a.demand_score, a.trend_score
                 FROM item_value_observations o
                 JOIN tracked_assets a ON a.asset_id=o.asset_id
                 JOIN proof_messages p
@@ -869,15 +879,25 @@ class Database:
             return None
 
         weighted: list[tuple[int, float]] = []
+        showcase_weighted: list[tuple[int, float]] = []
         now = datetime.now(UTC)
+        half_life = max(float(recency_half_life_days), 0.1)
+        proof_factor = max(0.0, min(float(proof_executability_weight), 1.0))
+        verified_factor = max(
+            proof_factor, min(float(verified_executability_weight), 1.0)
+        )
         for row in direct.values():
             age_days = max(
                 (now - datetime.fromisoformat(row["observed_at"])).total_seconds()
                 / 86400,
                 0,
             )
-            weight = float(row["confidence"]) * (0.5 ** (age_days / 30)) * 2.0
-            weighted.append((int(row["observed_value"]), weight))
+            weight = float(row["confidence"]) * (0.5 ** (age_days / half_life)) * 2.0
+            observed_value = int(row["observed_value"])
+            factor = verified_factor if row["inferred_trade_id"] else proof_factor
+            executable_value = round(baseline + (observed_value - baseline) * factor)
+            weighted.append((executable_value, weight))
+            showcase_weighted.append((observed_value, weight))
         if not use_direct_only:
             for row in peers.values():
                 peer_baseline = int(row["baseline_value"] or 0)
@@ -903,27 +923,34 @@ class Database:
                     )
                 weight = (
                     float(row["confidence"])
-                    * (0.5 ** (age_days / 30))
+                    * (0.5 ** (age_days / half_life))
                     * similarity
                     * 0.5
                 )
-                weighted.append((peer_value, weight))
+                factor = verified_factor if row["inferred_trade_id"] else proof_factor
+                executable_peer_value = round(
+                    baseline + (peer_value - baseline) * factor
+                )
+                weighted.append((executable_peer_value, weight))
+                showcase_weighted.append((peer_value, weight))
         if not weighted:
             return None
         weighted.sort()
+        showcase_weighted.sort()
 
-        def weighted_quantile(fraction: float) -> int:
-            threshold = sum(weight for _, weight in weighted) * fraction
+        def weighted_quantile(values: list[tuple[int, float]], fraction: float) -> int:
+            threshold = sum(weight for _, weight in values) * fraction
             running = 0.0
-            for value, weight in weighted:
+            for value, weight in values:
                 running += weight
                 if running >= threshold:
                     return value
-            return weighted[-1][0]
+            return values[-1][0]
 
-        estimate = weighted_quantile(0.5)
-        lower_value = weighted_quantile(0.2)
-        upper_value = weighted_quantile(0.8)
+        estimate = weighted_quantile(weighted, 0.5)
+        lower_value = weighted_quantile(weighted, 0.2)
+        upper_value = weighted_quantile(weighted, 0.8)
+        showcase_value = weighted_quantile(showcase_weighted, 0.5)
         direct_count = len(direct)
         peer_count = 0 if use_direct_only else len(peers)
         uncertainty_pct = round((upper_value - lower_value) / baseline * 100, 2)
@@ -938,6 +965,12 @@ class Database:
             "high" if use_direct_only and uncertainty_pct <= 15
             else "medium" if direct_count or uncertainty_pct <= 10
             else "low"
+        )
+        total_weight = sum(weight for _, weight in weighted)
+        effective_proof_count = round(
+            (total_weight * total_weight)
+            / sum(weight * weight for _, weight in weighted),
+            2,
         )
         average_raw_adjustment = (
             round(
@@ -965,6 +998,8 @@ class Database:
         )
         return {
             "value": estimate,
+            "showcase_value": showcase_value,
+            "selection_bias_adjustment": estimate - showcase_value,
             "baseline_value": baseline,
             "adjustment": estimate - baseline,
             "adjustment_pct": round((estimate / baseline - 1) * 100, 2),
@@ -979,10 +1014,18 @@ class Database:
             "direct_proof_count": direct_count,
             "peer_proof_count": peer_count,
             "source": source,
+            "recency_half_life_days": half_life,
+            "proof_executability_weight": proof_factor,
+            "verified_executability_weight": verified_factor,
+            "effective_proof_count": effective_proof_count,
+            "estimation_model": "recency-weighted, showcase-bias-adjusted",
         }
 
     def learned_market_values(
-        self, *, min_proofs: int = 3, max_age_days: int = 90
+        self, *, min_proofs: int = 3, max_age_days: int = 90,
+        recency_half_life_days: float = 14,
+        proof_executability_weight: float = 0.50,
+        verified_executability_weight: float = 0.85,
     ) -> list[dict]:
         """List eligible learned values and their distinct-proof support."""
         with self.connect() as connection:
@@ -1000,6 +1043,9 @@ class Database:
                 row["asset_id"],
                 min_proofs=min_proofs,
                 max_age_days=max_age_days,
+                recency_half_life_days=recency_half_life_days,
+                proof_executability_weight=proof_executability_weight,
+                verified_executability_weight=verified_executability_weight,
             )
             if estimate is not None:
                 values.append(
@@ -1059,6 +1105,12 @@ class Database:
                 ),
                 "active_trade_ad_users": count(
                     "SELECT COUNT(user_id) FROM watched_users WHERE enabled=1 AND last_trade_ad_at IS NOT NULL"
+                ),
+                "admitted_trade_ad_users": count(
+                    "SELECT COUNT(user_id) FROM watched_users WHERE trade_ad_admitted=1"
+                ),
+                "unadmitted_trade_ad_users": count(
+                    "SELECT COUNT(user_id) FROM watched_users WHERE last_trade_ad_at IS NOT NULL AND trade_ad_admitted=0"
                 ),
                 "archived_trade_ad_users": count(
                     "SELECT COUNT(user_id) FROM watched_users WHERE enabled=0 AND last_trade_ad_at IS NOT NULL"
@@ -1197,11 +1249,17 @@ class Database:
     def ingest_rolimons_trade_ads(
         self, ads, *, repromote_seconds: int = 1800,
         asset_priority_seconds: int = 21600,
+        admission_window_seconds: int = 86400,
+        admission_min_ads: int = 3,
+        admission_min_offer_value: int = 100000,
+        admission_max_users: int = 500,
+        asset_min_offers: int = 3,
+        asset_max_priority: int = 200,
     ) -> dict:
         now = datetime.now(UTC)
         now_text = now.isoformat()
         priority_until = (now + timedelta(seconds=max(asset_priority_seconds, 1))).isoformat()
-        repromote_before = (now - timedelta(seconds=max(repromote_seconds, 1))).isoformat()
+        activity_cutoff = (now - timedelta(seconds=max(admission_window_seconds, 1))).isoformat()
         new_ads = 0
         advertisers: set[int] = set()
         offered_assets: set[int] = set()
@@ -1226,34 +1284,22 @@ class Database:
                     continue
                 new_ads += 1
                 advertisers.add(int(ad.user_id))
-                current = connection.execute(
-                    "SELECT last_polled_at FROM watched_users WHERE user_id=?",
-                    (int(ad.user_id),),
-                ).fetchone()
-                should_promote = current is None or not current["last_polled_at"] or current["last_polled_at"] <= repromote_before
                 connection.execute(
                     """
                     INSERT INTO watched_users (
                         user_id, source, enabled, added_at, next_poll_at,
                         poll_priority, username, last_trade_ad_at
-                    ) VALUES (?, 'trade_ad', 1, ?, ?, ?, ?, ?)
+                    ) VALUES (?, 'trade_ad', 0, ?, ?, 0, ?, ?)
                     ON CONFLICT(user_id) DO UPDATE SET
-                        source=CASE WHEN watched_users.source='active_transfer'
-                                    THEN watched_users.source ELSE 'trade_ad' END,
-                        enabled=1, username=excluded.username,
+                        username=excluded.username,
                         last_trade_ad_at=MAX(COALESCE(watched_users.last_trade_ad_at, excluded.last_trade_ad_at), excluded.last_trade_ad_at),
-                        poll_priority=MAX(watched_users.poll_priority, excluded.poll_priority),
-                        next_poll_at=CASE WHEN excluded.poll_priority>0 THEN
-                            MIN(COALESCE(watched_users.next_poll_at, excluded.next_poll_at), excluded.next_poll_at)
-                            ELSE watched_users.next_poll_at END
+                        source=CASE WHEN watched_users.source IN
+                            ('active_transfer', 'proof', 'manual', 'cli')
+                            THEN watched_users.source ELSE 'trade_ad' END
                     """,
-                    (int(ad.user_id), now_text, now_text,
-                     150 if should_promote else 0, ad.username[:100], created_text),
+                    (int(ad.user_id), now_text, now_text, ad.username[:100], created_text),
                 )
-                for side, items, score in (
-                    ("offer", ad.offer_items, 150),
-                    ("request", ad.request_items, 90),
-                ):
+                for side, items in (("offer", ad.offer_items), ("request", ad.request_items)):
                     for position, asset_id in enumerate(items):
                         asset_id = int(asset_id)
                         connection.execute(
@@ -1262,22 +1308,94 @@ class Database:
                             (int(ad.ad_id), side, position, asset_id),
                         )
                         (offered_assets if side == "offer" else requested_assets).add(asset_id)
-                        connection.execute(
-                            """
-                            UPDATE tracked_assets SET
-                                priority_score=MAX(priority_score, ?),
-                                priority_reason='trade_ad', priority_until=?,
-                                next_sweep_at=MIN(next_sweep_at, ?)
-                            WHERE asset_id=?
-                            """,
-                            (score, priority_until, now_text, asset_id),
-                        )
+
+            # Recompute a bounded cohort. All ads remain stored, but a one-off
+            # advertiser only enters polling when offering a high-value item.
+            connection.execute(
+                "UPDATE watched_users SET trade_ad_admitted=0, trade_ad_score=0 WHERE last_trade_ad_at IS NOT NULL"
+            )
+            connection.execute(
+                "UPDATE watched_users SET enabled=0, poll_priority=0 WHERE source='trade_ad'"
+            )
+            candidates = connection.execute(
+                """
+                SELECT a.user_id, MAX(a.username) AS username,
+                       MAX(a.created_at) AS last_ad_at,
+                       COUNT(DISTINCT a.ad_id) AS ad_count,
+                       COALESCE(MAX(t.market_value), 0) AS max_offer_value
+                FROM rolimons_trade_ads a
+                LEFT JOIN rolimons_trade_ad_items i
+                  ON i.ad_id=a.ad_id AND i.side='offer'
+                LEFT JOIN tracked_assets t ON t.asset_id=i.asset_id
+                WHERE a.created_at>=?
+                GROUP BY a.user_id
+                HAVING COUNT(DISTINCT a.ad_id)>=? OR COALESCE(MAX(t.market_value), 0)>=?
+                ORDER BY COUNT(DISTINCT a.ad_id) DESC,
+                         COALESCE(MAX(t.market_value), 0) DESC,
+                         MAX(a.created_at) DESC
+                LIMIT ?
+                """,
+                (activity_cutoff, max(int(admission_min_ads), 1),
+                 max(int(admission_min_offer_value), 0), max(int(admission_max_users), 1)),
+            ).fetchall()
+            admitted_users: set[int] = set()
+            for candidate in candidates:
+                user_id = int(candidate["user_id"])
+                admitted_users.add(user_id)
+                score = int(candidate["ad_count"]) * 10 + min(
+                    int(candidate["max_offer_value"]) / 10000, 100
+                )
+                connection.execute(
+                    """
+                    UPDATE watched_users SET enabled=1, trade_ad_admitted=1,
+                        trade_ad_score=?, poll_priority=MAX(poll_priority, 150),
+                        next_poll_at=CASE
+                            WHEN last_polled_at IS NULL OR last_polled_at<=? THEN
+                                MIN(COALESCE(next_poll_at, ?), ?)
+                            ELSE next_poll_at END
+                    WHERE user_id=?
+                    """,
+                    (score, (now - timedelta(seconds=max(repromote_seconds, 1))).isoformat(),
+                     now_text, now_text, user_id),
+                )
+
+            # Requested items are not ownership evidence. Promote only the top
+            # repeatedly offered assets, keeping the priority lane selective.
+            connection.execute(
+                """UPDATE tracked_assets SET priority_score=0,
+                       priority_reason=NULL, priority_until=NULL
+                   WHERE priority_reason='trade_ad'"""
+            )
+            active_assets = connection.execute(
+                """
+                SELECT i.asset_id, COUNT(DISTINCT i.ad_id) AS offer_count
+                FROM rolimons_trade_ad_items i
+                JOIN rolimons_trade_ads a ON a.ad_id=i.ad_id
+                WHERE i.side='offer' AND a.created_at>=?
+                GROUP BY i.asset_id
+                HAVING COUNT(DISTINCT i.ad_id)>=?
+                ORDER BY COUNT(DISTINCT i.ad_id) DESC
+                LIMIT ?
+                """,
+                (activity_cutoff, max(int(asset_min_offers), 1),
+                 max(int(asset_max_priority), 1)),
+            ).fetchall()
+            for asset in active_assets:
+                score = min(80 + int(asset["offer_count"]) * 5, 150)
+                connection.execute(
+                    """UPDATE tracked_assets SET priority_score=MAX(priority_score, ?),
+                       priority_reason='trade_ad', priority_until=?,
+                       next_sweep_at=MIN(next_sweep_at, ?) WHERE asset_id=?""",
+                    (score, priority_until, now_text, int(asset["asset_id"])),
+                )
             connection.commit()
         return {
             "received_ads": len(ads), "new_ads": new_ads,
             "new_advertisers": len(advertisers),
             "offered_assets": len(offered_assets),
             "requested_assets": len(requested_assets),
+            "admitted_users": len(admitted_users),
+            "priority_assets": len(active_assets),
         }
 
     def watched_user_ids(self) -> list[int]:

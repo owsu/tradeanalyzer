@@ -209,6 +209,13 @@ ads, inventory observations, and ownership history remain stored. Any new ad
 immediately re-enables and promotes that user. These windows and intervals are
 configurable with the `TRADE_AD_*` environment settings.
 
+All ads are retained, but inventory polling admission is capped and scored.
+The default cohort contains at most 500 users who either posted at least three
+ads in 24 hours or offered an item worth at least 100k. Requested items never
+count as ownership evidence. Only the top 200 assets offered in at least three
+recent ads receive trade-ad sweep priority. Proof and observed-transfer
+priorities remain independent of this cohort refresh.
+
 Add public users and run one collection/correlation cycle:
 
 ```powershell
@@ -286,6 +293,13 @@ premium. A largest payment item worth at least 85% of the target requires no
 fragmentation compensation; 65-85%, 40-65%, and below 40% use progressively
 larger compensation tiers. More than two payment items and lower value-weighted
 demand add further compensation, capped at 15% of baseline value.
+Proofs are also treated as a selected showcase sample rather than an unbiased
+execution feed. Their recency weight now has a 14-day half-life. The report
+exposes `showcase_value`, while the effective `value` uses half of an unverified
+proof's deviation from baseline by default. A proof linked to a positively
+observed reciprocal ownership swap retains 85% because its execution evidence
+is stronger. This shrinkage is symmetric for premiums and discounts and is
+configurable through the `LEARNED_VALUE_*EXECUTABILITY_WEIGHT` settings.
 Linked ownership swaps raise the evidence confidence. With enough direct
 observations, the estimator uses their recency-weighted median; before then it
 borrows adjustment ratios from items between half and twice the target's

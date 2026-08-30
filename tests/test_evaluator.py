@@ -44,7 +44,7 @@ def test_evaluator_returns_structured_result():
 
 def test_evaluator_uses_learned_value_before_rolimons_fallback():
     class LearnedValues:
-        def learned_item_value(self, asset_id, *, min_proofs, max_age_days):
+        def learned_item_value(self, asset_id, **kwargs):
             return {
                 "value": 15_000,
                 "proof_count": 4,
