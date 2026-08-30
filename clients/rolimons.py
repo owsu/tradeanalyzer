@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Protocol, Sequence
 
 import requests
 
@@ -16,6 +16,10 @@ class ItemNotFoundError(KeyError):
     """Raised when an asset ID is not present in the current catalog."""
 
 
+class TradeAdAutomationGuard(Protocol):
+    def require_trade_ads_enabled(self) -> None: ...
+
+
 class RolimonsClient:
     """Rolimons client with an explicit refresh boundary."""
 
@@ -25,11 +29,13 @@ class RolimonsClient:
         session: requests.Session | None = None,
         timeout: float = 10.0,
         auto_refresh: bool = True,
+        automation: TradeAdAutomationGuard | None = None,
     ) -> None:
         self.session = session or requests.Session()
         self.timeout = timeout
         self.items: dict[str, Sequence] = {}
         self.last_endpoint: str | None = None
+        self.automation = automation
 
         if auto_refresh:
             self.refresh()
@@ -116,6 +122,14 @@ class RolimonsClient:
         request_tags: str | list[str],
         player_id: int,
     ) -> dict:
+        # Check immediately before constructing the external mutation. Keeping
+        # this guard inside the client prevents a worker from bypassing it by
+        # accident.
+        if self.automation is None:
+            raise RuntimeError(
+                "Trade-ad posting requires an AutomationController safety guard"
+            )
+        self.automation.require_trade_ads_enabled()
         url = "https://api.rolimons.com/tradeads/v1/createad"
         tags = (
             [tag.strip() for tag in request_tags.split(",") if tag.strip()]

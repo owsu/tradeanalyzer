@@ -3,12 +3,26 @@ from __future__ import annotations
 from config import (
     BASE_SCORE,
     DEMAND_POINT_WEIGHT,
-    DOWNGRADE_EXPECTED_OP_PENALTY,
+    DOWNGRADE_FRAGMENTED_MIN_RATIO,
+    DOWNGRADE_FRAGMENTED_PENALTY,
+    DOWNGRADE_HEAVY_FRAGMENTATION_PENALTY,
+    DOWNGRADE_NEAR_SIZE_BONUS,
+    DOWNGRADE_NEAR_SIZE_MIN_RATIO,
+    DOWNGRADE_SOLID_SIZE_BONUS,
+    DOWNGRADE_SOLID_SIZE_MIN_RATIO,
     ITEM_SIZE_WEIGHT,
     PROJECTED_GIVE_BONUS,
     PROJECTED_RECEIVE_PENALTY,
     RARE_RECEIVE_UNCERTAINTY_PENALTY,
-    UPGRADE_BONUS,
+    UPGRADE_EXCESS_OP_MAX_PENALTY,
+    UPGRADE_EXCESS_OP_PENALTY_PER_PCT,
+    UPGRADE_HIGH_OP_BONUS,
+    UPGRADE_HIGH_OP_MAX_PCT,
+    UPGRADE_LOW_OP_BONUS,
+    UPGRADE_LOW_OP_MAX_PCT,
+    UPGRADE_MODERATE_OP_BONUS,
+    UPGRADE_MODERATE_OP_MAX_PCT,
+    UPGRADE_UNDERPAY_BONUS,
     VALUE_SCORE_WEIGHT,
 )
 from models import TradeSideSummary
@@ -18,9 +32,46 @@ def calculate_demand_difference(
     giving: TradeSideSummary,
     receiving: TradeSideSummary,
 ) -> float:
-    if giving.weighted_demand < 0 or receiving.weighted_demand < 0:
-        return 0.0
     return receiving.weighted_demand - giving.weighted_demand
+
+
+def calculate_upgrade_incentive(
+    giving_value: int,
+    receiving_value: int,
+) -> float:
+    """Reward efficient upgrades and penalize overpay that burns the benefit."""
+    overpay = giving_value - receiving_value
+    if overpay <= 0:
+        return UPGRADE_UNDERPAY_BONUS
+
+    overpay_pct = overpay / giving_value * 100
+    if overpay_pct <= UPGRADE_LOW_OP_MAX_PCT:
+        return UPGRADE_LOW_OP_BONUS
+    if overpay_pct <= UPGRADE_MODERATE_OP_MAX_PCT:
+        return UPGRADE_MODERATE_OP_BONUS
+    if overpay_pct <= UPGRADE_HIGH_OP_MAX_PCT:
+        return UPGRADE_HIGH_OP_BONUS
+
+    excess_pct = overpay_pct - UPGRADE_HIGH_OP_MAX_PCT
+    return -min(
+        UPGRADE_EXCESS_OP_MAX_PENALTY,
+        excess_pct * UPGRADE_EXCESS_OP_PENALTY_PER_PCT,
+    )
+
+
+def calculate_downgrade_incentive(
+    giving_biggest_value: int,
+    receiving_biggest_value: int,
+) -> float:
+    """Score how much of a downgrade remains concentrated in its main item."""
+    retention_ratio = receiving_biggest_value / max(giving_biggest_value, 1)
+    if retention_ratio >= DOWNGRADE_NEAR_SIZE_MIN_RATIO:
+        return DOWNGRADE_NEAR_SIZE_BONUS
+    if retention_ratio >= DOWNGRADE_SOLID_SIZE_MIN_RATIO:
+        return DOWNGRADE_SOLID_SIZE_BONUS
+    if retention_ratio >= DOWNGRADE_FRAGMENTED_MIN_RATIO:
+        return -DOWNGRADE_FRAGMENTED_PENALTY
+    return -DOWNGRADE_HEAVY_FRAGMENTATION_PENALTY
 
 
 def calculate_score_components(
@@ -46,15 +97,23 @@ def calculate_score_components(
 
     direction_component = 0.0
     if trade_type == "upgrade":
-        direction_component = UPGRADE_BONUS
+        direction_component = calculate_upgrade_incentive(
+            giving.effective_value,
+            receiving.effective_value,
+        )
     elif trade_type == "downgrade":
-        direction_component = -DOWNGRADE_EXPECTED_OP_PENALTY
+        direction_component = calculate_downgrade_incentive(
+            giving.biggest_item_value,
+            receiving.biggest_item_value,
+        )
 
     projected_component = (
-        giving.projected_count * PROJECTED_GIVE_BONUS
-        - receiving.projected_count * PROJECTED_RECEIVE_PENALTY
+        giving.projected_value_share * PROJECTED_GIVE_BONUS
+        - receiving.projected_value_share * PROJECTED_RECEIVE_PENALTY
     )
-    rare_component = -receiving.rare_count * RARE_RECEIVE_UNCERTAINTY_PENALTY
+    rare_component = (
+        -receiving.rare_value_share * RARE_RECEIVE_UNCERTAINTY_PENALTY
+    )
 
     components = {
         "base": BASE_SCORE,

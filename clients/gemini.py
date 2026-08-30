@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Sequence
 from typing import Any
 
 from config import GEMINI_MODEL
@@ -43,8 +44,27 @@ class GeminiClient:
         )
         return response.text or ""
 
-    def generate_json(self, prompt: str) -> dict[str, Any]:
-        text = self._strip_code_fences(self.generate_text(prompt))
+    def generate_json(
+        self,
+        prompt: str,
+        *,
+        images: Sequence[tuple[bytes, str]] = (),
+    ) -> dict[str, Any]:
+        from google.genai import types
+
+        contents: list[Any] = [
+            types.Part.from_bytes(data=data, mime_type=mime_type)
+            for data, mime_type in images
+        ]
+        contents.append(prompt)
+        response = self._client.models.generate_content(
+            model=self.model,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+            ),
+        )
+        text = self._strip_code_fences(response.text or "")
         payload = json.loads(text)
         if not isinstance(payload, dict):
             raise TypeError("Gemini returned JSON, but it was not an object")

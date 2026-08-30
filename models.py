@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import date as Date, datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -52,9 +53,12 @@ class TradeSideSummary:
     base_value: int
     effective_value: int
     weighted_demand: float
+    demand_coverage: float
     biggest_item_value: int
     projected_count: int
+    projected_value_share: float
     rare_count: int
+    rare_value_share: float
 
 
 @dataclass(frozen=True)
@@ -122,6 +126,13 @@ class TradeEvaluation:
 # Proof models
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
+class ProofImage:
+    data: bytes
+    mime_type: str
+    filename: str | None = None
+
+
+@dataclass(frozen=True)
 class RawProof:
     """Source-agnostic proof before the LLM parses it.
 
@@ -131,8 +142,10 @@ class RawProof:
 
     source: str
     text: str | None = None
+    images: tuple[ProofImage, ...] = ()
     image_urls: tuple[str, ...] = ()
     message_id: str | None = None
+    channel_id: str | None = None
     author: str | None = None
     timestamp: datetime | None = None
 
@@ -141,6 +154,11 @@ class ProofItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(min_length=1)
+    asset_id: int | None = Field(default=None, gt=0)
+    rap: int | None = Field(default=None, ge=0)
+    market_value: int | None = Field(default=None, ge=0)
+    # Legacy parser field. It is intentionally not used for valuation because
+    # old screenshots often caused RAP to be stored here as if it were value.
     stated_value: int | None = Field(default=None, ge=0)
 
     @field_validator("name")
@@ -156,8 +174,13 @@ class Proof(BaseModel):
     receiving: list[ProofItem] = Field(default_factory=list)
     giving_total: int | None = Field(default=None, ge=0)
     receiving_total: int | None = Field(default=None, ge=0)
+    giving_rap_total: int | None = Field(default=None, ge=0)
+    receiving_rap_total: int | None = Field(default=None, ge=0)
     overpay_amount: int | None = Field(default=None, ge=0)
     overpay_item: str | None = None
+    deal_type: Literal["overpay", "underpay", "equal", "unknown"] = "unknown"
+    deal_amount: int | None = Field(default=None, ge=0)
+    deal_item: str | None = None
     sender: str | None = None
     receiver: str | None = None
     date: Date | None = None
@@ -167,7 +190,7 @@ class Proof(BaseModel):
     calculated_overpay_amount: int | None = Field(default=None, ge=0)
     validation_warnings: list[str] = Field(default_factory=list)
 
-    @field_validator("overpay_item", "sender", "receiver")
+    @field_validator("overpay_item", "deal_item", "sender", "receiver")
     @classmethod
     def clean_optional_text(cls, value: str | None) -> str | None:
         if value is None:

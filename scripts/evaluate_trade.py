@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from clients.rolimons import RolimonsClient
+from config import DATABASE_PATH
+from database import Database
 from trading.evaluator import TradeEvaluator
 
 
 def main() -> None:
     market = RolimonsClient()
-    evaluator = TradeEvaluator(market)
+    evaluator = TradeEvaluator(market, learned_values=Database(DATABASE_PATH))
 
     giving = input("Items giving (comma-separated IDs): ").strip()
     receiving = input("Items receiving (comma-separated IDs): ").strip()

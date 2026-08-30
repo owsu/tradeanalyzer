@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from typing import Iterable, Mapping, Protocol
 
-from config import ESTIMATED_VALUES
+from config import (
+    ESTIMATED_VALUES,
+    LEARNED_VALUE_MAX_AGE_DAYS,
+    LEARNED_VALUE_MIN_PROOFS,
+    UNRATED_DEMAND_BASELINE,
+)
 from models import EvaluatedItem, ItemSnapshot, TradeEvaluation, TradeSideSummary
 from trading.risk import build_reasons, recommendation_for
 from trading.scoring import calculate_score_components, total_score
@@ -12,17 +17,25 @@ class MarketClient(Protocol):
     def get_item(self, asset_id: int) -> ItemSnapshot: ...
 
 
+class LearnedValueProvider(Protocol):
+    def learned_item_value(
+        self, asset_id: int, *, min_proofs: int, max_age_days: int
+    ) -> dict | None: ...
+
+
 class TradeEvaluator:
     def __init__(
         self,
         market: MarketClient,
         *,
         estimated_values: Mapping[int, int] | None = None,
+        learned_values: LearnedValueProvider | None = None,
     ) -> None:
         self.market = market
         self.estimated_values = dict(
             ESTIMATED_VALUES if estimated_values is None else estimated_values
         )
+        self.learned_values = learned_values
 
     @staticmethod
     def _parse_ids(items: str | Iterable[int]) -> list[int]:
@@ -42,6 +55,18 @@ class TradeEvaluator:
         if asset_id in self.estimated_values:
             effective_value = int(self.estimated_values[asset_id])
             source = "custom estimate"
+        elif self.learned_values is not None and (
+            learned := self.learned_values.learned_item_value(
+                asset_id,
+                min_proofs=LEARNED_VALUE_MIN_PROOFS,
+                max_age_days=LEARNED_VALUE_MAX_AGE_DAYS,
+            )
+        ) is not None:
+            effective_value = int(learned["value"])
+            source = (
+                f"implied market ({learned['source']}, "
+                f"{learned['proof_count']} proofs)"
+            )
         else:
             effective_value = item.base_value
             source = "Rolimons Value" if item.roli_value is not None else "RAP"
@@ -66,24 +91,36 @@ class TradeEvaluator:
         effective_value = sum(item.effective_value for item in items)
         biggest_item_value = max(item.base_value for item in items)
 
-        demand_items = [item for item in items if item.demand_score >= 0]
-        demand_weight_total = sum(max(item.effective_value, 1) for item in demand_items)
-        if demand_items and demand_weight_total:
-            weighted_demand = sum(
-                item.demand_score * max(item.effective_value, 1)
-                for item in demand_items
-            ) / demand_weight_total
-        else:
-            weighted_demand = -1.0
+        demand_weight_total = sum(max(item.effective_value, 1) for item in items)
+        known_demand_weight = sum(
+            max(item.effective_value, 1) for item in items if item.demand_score >= 0
+        )
+        weighted_demand = sum(
+            (
+                item.demand_score
+                if item.demand_score >= 0
+                else UNRATED_DEMAND_BASELINE
+            )
+            * max(item.effective_value, 1)
+            for item in items
+        ) / demand_weight_total
+        demand_coverage = known_demand_weight / demand_weight_total
 
         return TradeSideSummary(
             items=items,
             base_value=base_value,
             effective_value=effective_value,
             weighted_demand=weighted_demand,
+            demand_coverage=demand_coverage,
             biggest_item_value=biggest_item_value,
             projected_count=sum(item.projected for item in items),
+            projected_value_share=sum(
+                item.effective_value for item in items if item.projected
+            )
+            / max(effective_value, 1),
             rare_count=sum(item.rare for item in items),
+            rare_value_share=sum(item.effective_value for item in items if item.rare)
+            / max(effective_value, 1),
         )
 
     @staticmethod
@@ -118,7 +155,7 @@ class TradeEvaluator:
         ) = calculate_score_components(giving, receiving, trade_type)
 
         score = total_score(components)
-        recommendation = recommendation_for(score, receiving)
+        recommendation = recommendation_for(score, receiving, trade_type)
         reasons = build_reasons(
             giving,
             receiving,

@@ -6,6 +6,14 @@ from models import Proof
 def validate_proof(proof: Proof) -> Proof:
     """Verify LLM-extracted proof arithmetic using normal Python."""
     warnings = list(proof.validation_warnings)
+    deal_type = proof.deal_type
+    deal_amount = proof.deal_amount
+    deal_item = proof.deal_item
+    # Backward compatibility for version-4 proof JSON.
+    if deal_type == "unknown" and proof.overpay_amount is not None:
+        deal_type = "overpay"
+        deal_amount = proof.overpay_amount
+        deal_item = deal_item or proof.overpay_item
 
     if not proof.valid:
         return proof.model_copy(
@@ -22,8 +30,8 @@ def validate_proof(proof: Proof) -> Proof:
             }
         )
 
-    giving_item_values = [item.stated_value for item in proof.giving]
-    receiving_item_values = [item.stated_value for item in proof.receiving]
+    giving_item_values = [item.market_value for item in proof.giving]
+    receiving_item_values = [item.market_value for item in proof.receiving]
 
     calculated_giving_total: int | None = None
     calculated_receiving_total: int | None = None
@@ -68,17 +76,25 @@ def validate_proof(proof: Proof) -> Proof:
     calculated_overpay: int | None = None
     if giving_total is not None and receiving_total is not None:
         calculated_overpay = abs(receiving_total - giving_total)
-        if proof.overpay_amount not in (None, calculated_overpay):
+        if deal_amount not in (None, calculated_overpay):
             warnings.append(
-                f"LLM overpay_amount={proof.overpay_amount} but Python calculates "
+                f"Parsed deal_amount={deal_amount} but Python calculates "
                 f"{calculated_overpay}"
             )
+    elif deal_amount is not None:
+        warnings.append(
+            "Deal adjustment was explicitly stated but cannot be independently verified "
+            "because complete market values were not visible"
+        )
 
     return proof.model_copy(
         update={
             "giving_total": giving_total,
             "receiving_total": receiving_total,
             "calculated_overpay_amount": calculated_overpay,
+            "deal_type": deal_type,
+            "deal_amount": deal_amount,
+            "deal_item": deal_item,
             "validation_warnings": warnings,
         }
     )
