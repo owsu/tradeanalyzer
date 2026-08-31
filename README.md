@@ -182,6 +182,15 @@ holding periods, Robux limits, privacy, 2FA, and trade eligibility.
 
 ## Public-inventory trade inference
 
+User inventory polling prefers Roblox Open Cloud when
+`ROBLOX_OPEN_CLOUD_API_KEY` is configured. It requests only non-UGC collectible
+instances and uses each returned `instanceId` as the UAID. If Open Cloud is
+unavailable, the collector falls back to the legacy public collectible-inventory
+endpoint. Owner pages remain on Roblox's legacy asset-owner endpoint because
+Open Cloud does not provide a bulk owner-change feed. Identical user inventory
+fingerprints are recorded as successful polls without repeating UAID comparison
+work.
+
 ### Permissioned Rolimon's trade-ad discovery
 
 When authorized to use Rolimon's bot API, run its recent-ad collector as an

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import time
 
 import requests
 
@@ -241,3 +242,107 @@ class RobloxInventoryClient:
             if not cursor:
                 break
         return results
+
+
+class HybridRobloxInventoryClient(RobloxInventoryClient):
+    """Prefer Open Cloud inventories while retaining legacy owner APIs."""
+
+    OPEN_CLOUD_URL = "https://apis.roblox.com/cloud/v2/users/{user_id}/inventory-items"
+
+    def __init__(self, *, open_cloud_api_key: str | None = None,
+                 open_cloud_enabled: bool = True, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.open_cloud_api_key = (open_cloud_api_key or "").strip()
+        self.open_cloud_enabled = bool(open_cloud_enabled and self.open_cloud_api_key)
+        self.open_cloud_retry_at = 0.0
+        self.last_inventory_source = "legacy"
+
+    def _open_cloud_collectible_inventory(
+        self, user_id: int
+    ) -> list[CollectibleInstance]:
+        page_token: str | None = None
+        results: list[CollectibleInstance] = []
+        while True:
+            params = {
+                "maxPageSize": 100,
+                "filter": "onlyCollectibles=true;inventoryItemAssetTypes=*",
+            }
+            if page_token:
+                params["pageToken"] = page_token
+            try:
+                response = self.session.get(
+                    self.OPEN_CLOUD_URL.format(user_id=int(user_id)),
+                    params=params,
+                    headers={"x-api-key": self.open_cloud_api_key},
+                    timeout=self.timeout,
+                )
+            except requests.RequestException as exc:
+                raise InventoryError(f"Open Cloud inventory request failed: {exc}") from exc
+            if response.status_code == 429:
+                retry_after = None
+                try:
+                    retry_after = max(float(response.headers.get("Retry-After", "")), 0.0)
+                except (TypeError, ValueError):
+                    pass
+                raise InventoryRateLimitError(
+                    retry_after, operation="Open Cloud inventory"
+                )
+            if response.status_code in {401, 403}:
+                raise InventoryError(
+                    f"Open Cloud inventory request failed with HTTP {response.status_code}"
+                )
+            if not response.ok:
+                raise InventoryError(
+                    f"Open Cloud inventory request failed with HTTP {response.status_code}"
+                )
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise InventoryError("Open Cloud inventory returned invalid JSON") from exc
+            raw_items = payload.get("inventoryItems", [])
+            if not isinstance(raw_items, list):
+                raise InventoryError("Open Cloud inventory returned malformed items")
+            if not raw_items and page_token:
+                break
+            for raw in raw_items:
+                details = raw.get("assetDetails") if isinstance(raw, dict) else None
+                if not isinstance(details, dict):
+                    continue
+                try:
+                    results.append(CollectibleInstance(
+                        uaid=int(details["instanceId"]),
+                        asset_id=int(details["assetId"]),
+                        name=str(details.get("displayName") or details.get("name") or ""),
+                        rap=0,
+                    ))
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise InventoryError(
+                        f"Unexpected Open Cloud inventory item: {raw!r}"
+                    ) from exc
+            page_token = payload.get("nextPageToken")
+            if not page_token:
+                break
+        return results
+
+    def collectible_inventory(self, user_id: int) -> list[CollectibleInstance]:
+        if self.open_cloud_enabled and time.monotonic() >= self.open_cloud_retry_at:
+            try:
+                items = self._open_cloud_collectible_inventory(user_id)
+                self.last_inventory_source = "open_cloud"
+                return items
+            except InventoryRateLimitError as exc:
+                self.open_cloud_retry_at = time.monotonic() + max(
+                    float(exc.retry_after or 300), 60
+                )
+            except InventoryError:
+                self.open_cloud_retry_at = time.monotonic() + 60
+                # Keep collection alive while Open Cloud is unavailable or the
+                # key is misconfigured, without doubling every user request.
+                # Legacy failures retain their existing private/rate-limit
+                # handling in the caller.
+                self.last_inventory_source = "legacy_fallback"
+                return super().collectible_inventory(user_id)
+        self.last_inventory_source = (
+            "legacy_fallback" if self.open_cloud_enabled else "legacy"
+        )
+        return super().collectible_inventory(user_id)

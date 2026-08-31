@@ -19,6 +19,8 @@ from config import (
     OWNER_SWEEP_REQUEST_DELAY_SECONDS,
     PROOF_TRADE_LINK_WINDOW_DAYS,
     ROBLOX_SECURITY_COOKIE,
+    ROBLOX_OPEN_CLOUD_API_KEY,
+    ROBLOX_OPEN_CLOUD_INVENTORY_ENABLED,
     WATCHED_USER_POLL_BUDGET,
     WATCHED_USER_REQUEST_DELAY_SECONDS,
     WATCHED_USER_POLL_INTERVAL_SECONDS,
@@ -36,7 +38,7 @@ from clients.rolimons import RolimonsClient
 from database import Database
 from market.collector import InventoryCollector
 from market.correlator import TradeCorrelator
-from market.inventory_client import RobloxInventoryClient
+from market.inventory_client import HybridRobloxInventoryClient
 from market.owner_sweeper import OwnerSweeper
 
 
@@ -63,9 +65,11 @@ def sync_limited_catalog(database: Database) -> int:
 
 
 def run_cycle(database: Database) -> dict:
-    inventory_client = RobloxInventoryClient(
+    inventory_client = HybridRobloxInventoryClient(
         timeout=INVENTORY_REQUEST_TIMEOUT,
         security_cookie=ROBLOX_SECURITY_COOKIE,
+        open_cloud_api_key=ROBLOX_OPEN_CLOUD_API_KEY,
+        open_cloud_enabled=ROBLOX_OPEN_CLOUD_INVENTORY_ENABLED,
     )
     collector = InventoryCollector(
         database,

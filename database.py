@@ -104,7 +104,8 @@ class Database:
                     last_trade_ad_at TEXT,
                     trade_ad_admitted INTEGER NOT NULL DEFAULT 0,
                     trade_ad_score REAL NOT NULL DEFAULT 0,
-                    trade_ad_archived_at TEXT
+                    trade_ad_archived_at TEXT,
+                    last_inventory_fingerprint TEXT
                 );
                 CREATE TABLE IF NOT EXISTS rolimons_trade_ads (
                     ad_id INTEGER PRIMARY KEY,
@@ -256,6 +257,7 @@ class Database:
             self._ensure_column(connection, "watched_users", "trade_ad_admitted", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "watched_users", "trade_ad_score", "REAL NOT NULL DEFAULT 0")
             self._ensure_column(connection, "watched_users", "trade_ad_archived_at", "TEXT")
+            self._ensure_column(connection, "watched_users", "last_inventory_fingerprint", "TEXT")
             self._ensure_column(
                 connection,
                 "item_value_observations",
@@ -1840,13 +1842,28 @@ class Database:
             )
             connection.commit()
 
-    def observe_inventory(self, user_id: int, items, observed_at: datetime) -> list[int]:
-        """Observe positive ownership only; missing items never imply transfers."""
+    def observe_inventory_snapshot(
+        self, user_id: int, items, observed_at: datetime
+    ) -> tuple[list[int], bool]:
+        """Observe ownership, skipping UAID work for an identical snapshot."""
         user_id = int(user_id)
         observed_text = observed_at.isoformat()
+        fingerprint = hashlib.sha256(
+            "|".join(
+                f"{int(item.uaid)}:{int(item.asset_id)}"
+                for item in sorted(items, key=lambda item: (int(item.uaid), int(item.asset_id)))
+            ).encode("ascii")
+        ).hexdigest()
         transfer_ids: list[int] = []
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            watched = connection.execute(
+                "SELECT last_inventory_fingerprint FROM watched_users WHERE user_id=?",
+                (user_id,),
+            ).fetchone()
+            unchanged = bool(
+                watched and watched["last_inventory_fingerprint"] == fingerprint
+            )
             connection.execute(
                 """
                 INSERT INTO inventory_observations
@@ -1857,11 +1874,15 @@ class Database:
             )
             connection.execute(
                 """
-                UPDATE watched_users SET last_polled_at = ?, inventory_public = 1
+                UPDATE watched_users SET last_polled_at = ?, inventory_public = 1,
+                    last_inventory_fingerprint=?
                 WHERE user_id = ?
                 """,
-                (observed_text, user_id),
+                (observed_text, fingerprint, user_id),
             )
+            if unchanged:
+                connection.commit()
+                return [], True
             for item in items:
                 existing = connection.execute(
                     "SELECT * FROM uaid_ownership WHERE uaid = ?", (int(item.uaid),)
@@ -1900,6 +1921,23 @@ class Database:
                            WHERE asset_id=?""",
                         ((observed_at + timedelta(days=7)).isoformat(), observed_text, int(item.asset_id)),
                     )
+                    connection.execute(
+                        """
+                        INSERT INTO watched_users
+                            (user_id, source, enabled, added_at, next_poll_at,
+                             poll_priority)
+                        VALUES (?, 'active_transfer', 1, ?, ?, 200)
+                        ON CONFLICT(user_id) DO UPDATE SET
+                            source='active_transfer', enabled=1,
+                            poll_priority=MAX(poll_priority, 200),
+                            next_poll_at=MIN(
+                                COALESCE(watched_users.next_poll_at,
+                                         excluded.next_poll_at),
+                                excluded.next_poll_at
+                            )
+                        """,
+                        (int(existing["current_owner_id"]), observed_text, observed_text),
+                    )
                 connection.execute(
                     """
                     UPDATE uaid_ownership
@@ -1909,7 +1947,11 @@ class Database:
                     (item.asset_id, user_id, observed_text, item.uaid),
                 )
             connection.commit()
-        return transfer_ids
+        return transfer_ids, False
+
+    def observe_inventory(self, user_id: int, items, observed_at: datetime) -> list[int]:
+        """Compatibility wrapper returning transfers from a positive snapshot."""
+        return self.observe_inventory_snapshot(user_id, items, observed_at)[0]
 
     def correlate_reciprocal_transfers(self, window_seconds: int) -> list[int]:
         """Create inferred trades only when both directions of a swap exist."""

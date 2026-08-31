@@ -31,6 +31,10 @@ DATABASE_PATH = os.getenv("DATABASE_PATH", "data/trader.db")
 AUTOMATION_CONTROL_TOKEN = os.getenv("AUTOMATION_CONTROL_TOKEN")
 ROBLOX_SECURITY_COOKIE = os.getenv("ROBLOX_SECURITY_COOKIE")
 ROBLOX_USER_ID = _optional_positive_int_env("ROBLOX_USER_ID")
+ROBLOX_OPEN_CLOUD_API_KEY = os.getenv("ROBLOX_OPEN_CLOUD_API_KEY")
+ROBLOX_OPEN_CLOUD_INVENTORY_ENABLED = os.getenv(
+    "ROBLOX_OPEN_CLOUD_INVENTORY_ENABLED", "true"
+).strip().lower() in {"1", "true", "yes", "on"}
 
 # ---------------------------------------------------------------------------
 # Public-inventory trade inference
@@ -95,7 +99,7 @@ OWNER_SWEEP_PRIORITY_PAGE_BUDGET = int(
     os.getenv("OWNER_SWEEP_PRIORITY_PAGE_BUDGET", "6")
 )
 OWNER_SWEEP_BACKGROUND_PAGE_BUDGET = int(
-    os.getenv("OWNER_SWEEP_BACKGROUND_PAGE_BUDGET", "4")
+    os.getenv("OWNER_SWEEP_BACKGROUND_PAGE_BUDGET", "1")
 )
 OWNER_SWEEP_PAGE_ROTATION_SECONDS = float(
     os.getenv("OWNER_SWEEP_PAGE_ROTATION_SECONDS", "60")

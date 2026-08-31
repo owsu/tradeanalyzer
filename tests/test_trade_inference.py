@@ -7,6 +7,7 @@ from models import RawProof
 from market.inventory_client import (
     AssetOwnersUnavailableError,
     InventoryRateLimitError,
+    HybridRobloxInventoryClient,
     RobloxInventoryClient,
 )
 from market.owner_sweeper import OwnerSweeper
@@ -40,6 +41,57 @@ def test_watched_user_polling_is_budgeted_and_rotates(tmp_path):
 
     assert [result["user_id"] for result in results] == [1, 2]
     assert database.due_watched_user_ids(10) == [3]
+
+
+def test_open_cloud_inventory_parses_instance_ids():
+    class Response:
+        status_code = 200
+        ok = True
+        headers = {}
+
+        def json(self):
+            return {
+                "inventoryItems": [{
+                    "assetDetails": {"assetId": "1001", "instanceId": "90001"}
+                }],
+                "nextPageToken": "",
+            }
+
+    class Session:
+        def __init__(self):
+            self.headers = {}
+            self.cookies = type("Cookies", (), {
+                "set": lambda *args: None, "get": lambda *args: None,
+            })()
+
+        def get(self, url, **kwargs):
+            assert url.startswith("https://apis.roblox.com/cloud/v2/users/20/")
+            assert kwargs["headers"]["x-api-key"] == "key"
+            assert "onlyCollectibles=true" in kwargs["params"]["filter"]
+            return Response()
+
+    client = HybridRobloxInventoryClient(
+        session=Session(), open_cloud_api_key="key"
+    )
+    items = client.collectible_inventory(20)
+    assert [(item.uaid, item.asset_id, item.rap) for item in items] == [
+        (90001, 1001, 0)
+    ]
+    assert client.last_inventory_source == "open_cloud"
+
+
+def test_identical_inventory_snapshot_skips_ownership_work(tmp_path):
+    database = Database(tmp_path / "market.db")
+    database.add_watched_user(1)
+    start = datetime.now(UTC)
+    first = database.observe_inventory_snapshot(
+        1, [collectible(101, 1001)], start
+    )
+    second = database.observe_inventory_snapshot(
+        1, [collectible(101, 1001)], start + timedelta(minutes=5)
+    )
+    assert first == ([], False)
+    assert second == ([], True)
 
 
 def test_watched_user_polling_stops_on_first_rate_limit(tmp_path):

@@ -55,7 +55,9 @@ class InventoryCollector:
                     delay_seconds=self.failure_retry_seconds, succeeded=False,
                 )
             raise
-        transfer_ids = self.database.observe_inventory(user_id, items, observed_at)
+        transfer_ids, unchanged = self.database.observe_inventory_snapshot(
+            user_id, items, observed_at
+        )
         premium = self.client.premium_status(user_id)
         if premium is not None:
             self.database.update_premium_status(user_id, premium)
@@ -78,6 +80,8 @@ class InventoryCollector:
             "user_id": int(user_id),
             "item_count": len(items),
             "transfer_ids": transfer_ids,
+            "unchanged": unchanged,
+            "inventory_source": getattr(self.client, "last_inventory_source", "legacy"),
             "premium": premium,
             "observed_at": observed_at.isoformat(),
         }
