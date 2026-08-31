@@ -102,6 +102,7 @@ def test_trade_ad_users_cool_through_tiers_then_reactivate(tmp_path):
     delay_for(timedelta(days=366))
     assert database.archive_inactive_trade_ad_users(365) == 1
     assert database.watched_user_ids() == []
+    assert database.market_status()["archived_trade_ad_users"] == 1
 
     new_ad = RecentTradeAd(
         ad_id=11, created_at=int(datetime.now(UTC).timestamp()), user_id=20,
@@ -110,6 +111,7 @@ def test_trade_ad_users_cool_through_tiers_then_reactivate(tmp_path):
     )
     database.ingest_rolimons_trade_ads([new_ad], admission_min_ads=1)
     assert database.watched_user_ids() == [20]
+    assert database.market_status()["archived_trade_ad_users"] == 0
 
 
 def test_trade_ad_admission_is_capped(tmp_path):

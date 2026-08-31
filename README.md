@@ -257,7 +257,8 @@ cycle output; `errors` is reserved for unexpected request failures.
 Omit `--once` to poll continuously. The collector records positive UAID
 ownership observations; missing or private inventories never imply transfers.
 A transfer becomes an inferred trade only when one or more UAIDs move A to B
-and one or more UAIDs move B to A within `INFERRED_TRADE_WINDOW_SECONDS`.
+and one or more UAIDs move B to A within `INFERRED_TRADE_WINDOW_SECONDS`
+(six hours by default, so a bounded polling queue can still observe both legs).
 One-way ownership movement remains unmatched because it may be a marketplace
 sale. Both sides are limited to four inferred items, and every inferred result
 keeps `possible_robux=true` because inventory changes cannot reveal Robux.
@@ -300,6 +301,16 @@ proof's deviation from baseline by default. A proof linked to a positively
 observed reciprocal ownership swap retains 85% because its execution evidence
 is stronger. This shrinkage is symmetric for premiums and discounts and is
 configurable through the `LEARNED_VALUE_*EXECUTABILITY_WEIGHT` settings.
+
+Assigned-value items also receive a conservative RAP/value guard when Rolimon's
+demand is Normal or better and trend is Lowering, Stable, or Raising. Ratios at
+or below 83%, below 90%, and below 95% cap effective value at 90%, 95%, and 98%
+of assigned value respectively. A Lowering trend adds at most two percentage
+points of penalty only when the ratio is already weak. A Raising trend plus at
+least 97% RAP/value can add at most 2%. Unstable, fluctuating, unassigned-trend,
+low-demand, RAP-only, and manual custom-estimate items are ignored. The modifier
+is shown per item and in evaluation reasons; proof evidence remains primary and
+the small trend adjustment reflects that trend labels may lag the live market.
 Linked ownership swaps raise the evidence confidence. With enough direct
 observations, the estimator uses their recency-weighted median; before then it
 borrows adjustment ratios from items between half and twice the target's

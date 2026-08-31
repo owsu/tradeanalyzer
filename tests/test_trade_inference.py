@@ -399,6 +399,46 @@ def test_proof_showcase_value_is_recency_weighted_and_bias_adjusted(tmp_path):
     assert estimate["showcase_value"] == 12_000
     assert estimate["value"] == 11_000
     assert estimate["selection_bias_adjustment"] == -1_000
+    assert estimate["showcase_uncertainty_pct"] >= estimate["uncertainty_pct"]
+
+
+def test_peer_eligibility_uses_uncompressed_proof_uncertainty(tmp_path):
+    database = Database(tmp_path / "market.db")
+    for asset_id in (1001, 2001, 2002):
+        database.upsert_tracked_asset(
+            asset_id, name="Item", market_value=10_000, interval_seconds=600
+        )
+    now = datetime.now(UTC).isoformat()
+    with database.connect() as connection:
+        for message_id, asset_id, observed_value in (
+            ("low", 2001, 8_000),
+            ("high", 2002, 12_000),
+        ):
+            connection.execute(
+                """
+                INSERT INTO proof_messages (
+                    source, channel_id, message_id, content_hash, status,
+                    first_seen_at, updated_at
+                ) VALUES ('test', 'proofs', ?, ?, 'succeeded', ?, ?)
+                """,
+                (message_id, message_id, now, now),
+            )
+            connection.execute(
+                """
+                INSERT INTO item_value_observations (
+                    observation_key, asset_id, observed_value, observed_at,
+                    source, observation_kind, baseline_value, confidence,
+                    proof_source, proof_channel_id, proof_message_id
+                ) VALUES (?, ?, ?, ?, 'proof', 'implied', 10000, 1.0,
+                          'test', 'proofs', ?)
+                """,
+                (message_id, asset_id, observed_value, now, message_id),
+            )
+        connection.commit()
+
+    # The 50% executability shrink would compress this 40% raw range to 20%.
+    # It must remain ineligible because the underlying proof evidence is wide.
+    assert database.learned_item_value(1001, min_proofs=2) is None
 
 
 def test_overpay_and_underpay_create_signed_implied_values(tmp_path):

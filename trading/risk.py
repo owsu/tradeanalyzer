@@ -50,6 +50,16 @@ def build_reasons(
 ) -> list[str]:
     reasons: list[str] = []
 
+    for label, side in (("Giving", giving), ("Receiving", receiving)):
+        for item in side.items:
+            if item.rap_value_modifier != 1 and item.rap_value_ratio is not None:
+                direction = "cap" if item.rap_value_modifier < 1 else "uplift"
+                reasons.append(
+                    f"{label} {item.name}: RAP is {item.rap_value_ratio:.0%} of "
+                    f"assigned value with {item.trend_name} trend; effective-value "
+                    f"{direction} is {item.rap_value_modifier:.0%} of assigned value"
+                )
+
     if effective_difference > 0:
         reasons.append(f"Effective value gain of {effective_difference:,}")
     elif effective_difference < 0:

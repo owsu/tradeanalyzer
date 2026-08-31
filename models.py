@@ -22,6 +22,8 @@ class ItemSnapshot:
     demand_score: int
     projected: bool
     rare: bool
+    trend_name: str = "none"
+    trend_score: int = -1
 
     @property
     def base_value(self) -> int:
@@ -45,6 +47,10 @@ class EvaluatedItem:
     demand_score: int
     projected: bool
     rare: bool
+    trend_name: str = "none"
+    trend_score: int = -1
+    rap_value_ratio: float | None = None
+    rap_value_modifier: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -92,7 +98,7 @@ class TradeEvaluation:
                         f"  RAP: {item.rap:,} | Roli Value: {assigned}",
                         f"  Effective: {item.effective_value:,} ({item.effective_value_source})",
                         (
-                            f"  Demand: {item.demand_name} | "
+                            f"  Demand: {item.demand_name} | Trend: {item.trend_name} | "
                             f"Projected: {item.projected} | Rare: {item.rare}"
                         ),
                     ]

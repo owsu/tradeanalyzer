@@ -15,6 +15,8 @@ def item(
     value: int,
     *,
     demand: int = 2,
+    rap: int | None = None,
+    trend: int = -1,
     projected: bool = False,
     rare: bool = False,
 ) -> ItemSnapshot:
@@ -22,14 +24,42 @@ def item(
         asset_id=asset_id,
         name=f"Item {asset_id}",
         acronym="",
-        rap=value,
+        rap=value if rap is None else rap,
         roli_value=value,
         default_value=value,
         demand_name="normal",
         demand_score=demand,
         projected=projected,
         rare=rare,
+        trend_name={-1: "none", 0: "lowering", 1: "unstable", 2: "stable", 3: "raising"}.get(trend, "fluctuating"),
+        trend_score=trend,
     )
+
+
+def test_rap_value_guard_is_demand_and_trend_gated():
+    market = FakeMarket({
+        1: item(1, 10_000, rap=8_000, demand=2, trend=2),
+        2: item(2, 10_000, rap=8_000, demand=2, trend=0),
+        3: item(3, 10_000, rap=8_000, demand=1, trend=2),
+        4: item(4, 10_000, rap=8_000, demand=2, trend=1),
+        5: item(5, 10_000, rap=9_800, demand=2, trend=3),
+    })
+    evaluator = TradeEvaluator(market, estimated_values={})
+
+    assert evaluator._evaluate_item(1).effective_value == 9_000
+    assert evaluator._evaluate_item(2).effective_value == 8_800
+    assert evaluator._evaluate_item(3).effective_value == 10_000
+    assert evaluator._evaluate_item(4).effective_value == 10_000
+    assert evaluator._evaluate_item(5).effective_value == 10_200
+
+
+def test_custom_estimate_bypasses_rap_value_guard():
+    market = FakeMarket({1: item(1, 10_000, rap=8_000, demand=2, trend=0)})
+    evaluated = TradeEvaluator(
+        market, estimated_values={1: 15_000}
+    )._evaluate_item(1)
+    assert evaluated.effective_value == 15_000
+    assert evaluated.rap_value_modifier == 1.0
 
 
 def test_evaluator_returns_structured_result():

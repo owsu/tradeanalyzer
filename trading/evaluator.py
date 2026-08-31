@@ -10,6 +10,15 @@ from config import (
     LEARNED_VALUE_PROOF_EXECUTABILITY_WEIGHT,
     LEARNED_VALUE_VERIFIED_EXECUTABILITY_WEIGHT,
     UNRATED_DEMAND_BASELINE,
+    RAP_VALUE_BAD_RATIO,
+    RAP_VALUE_DECENT_RATIO,
+    RAP_VALUE_GOOD_RATIO,
+    RAP_VALUE_RAISING_RATIO,
+    RAP_VALUE_BAD_MULTIPLIER,
+    RAP_VALUE_DECENT_MULTIPLIER,
+    RAP_VALUE_GOOD_MULTIPLIER,
+    RAP_VALUE_LOWERING_EXTRA_PENALTY,
+    RAP_VALUE_RAISING_MAX_BONUS,
 )
 from models import EvaluatedItem, ItemSnapshot, TradeEvaluation, TradeSideSummary
 from trading.risk import build_reasons, recommendation_for
@@ -79,6 +88,49 @@ class TradeEvaluator:
             effective_value = item.base_value
             source = "Rolimons Value" if item.roli_value is not None else "RAP"
 
+        rap_value_ratio: float | None = None
+        rap_value_modifier = 1.0
+        eligible_for_guard = (
+            source != "custom estimate"
+            and item.roli_value is not None and item.roli_value > 0
+            and item.demand_score >= 2
+            and item.trend_score in {0, 2, 3}
+        )
+        if eligible_for_guard:
+            rap_value_ratio = item.rap / item.roli_value
+            candidate_modifier = 1.0
+            if rap_value_ratio <= RAP_VALUE_BAD_RATIO:
+                candidate_modifier = RAP_VALUE_BAD_MULTIPLIER
+            elif rap_value_ratio < RAP_VALUE_DECENT_RATIO:
+                candidate_modifier = RAP_VALUE_DECENT_MULTIPLIER
+            elif rap_value_ratio < RAP_VALUE_GOOD_RATIO:
+                candidate_modifier = RAP_VALUE_GOOD_MULTIPLIER
+            if item.trend_score == 0 and candidate_modifier < 1:
+                candidate_modifier = max(
+                    candidate_modifier - RAP_VALUE_LOWERING_EXTRA_PENALTY,
+                    0.85,
+                )
+            elif (
+                item.trend_score == 3
+                and rap_value_ratio >= RAP_VALUE_RAISING_RATIO
+                and effective_value <= item.roli_value
+            ):
+                candidate_modifier = 1 + RAP_VALUE_RAISING_MAX_BONUS
+
+            guarded_value = round(item.roli_value * candidate_modifier)
+            guarded_effective = effective_value
+            if candidate_modifier < 1:
+                guarded_effective = min(effective_value, guarded_value)
+            elif candidate_modifier > 1:
+                guarded_effective = max(effective_value, guarded_value)
+            if guarded_effective != effective_value:
+                effective_value = guarded_effective
+                rap_value_modifier = candidate_modifier
+                source += (
+                    f"; RAP/value guard {rap_value_modifier:.0%} "
+                    f"({item.trend_name})"
+                )
+
         return EvaluatedItem(
             asset_id=item.asset_id,
             name=item.name,
@@ -91,6 +143,10 @@ class TradeEvaluator:
             demand_score=item.demand_score,
             projected=item.projected,
             rare=item.rare,
+            trend_name=item.trend_name,
+            trend_score=item.trend_score,
+            rap_value_ratio=rap_value_ratio,
+            rap_value_modifier=rap_value_modifier,
         )
 
     @staticmethod

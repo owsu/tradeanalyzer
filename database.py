@@ -103,7 +103,8 @@ class Database:
                     username TEXT,
                     last_trade_ad_at TEXT,
                     trade_ad_admitted INTEGER NOT NULL DEFAULT 0,
-                    trade_ad_score REAL NOT NULL DEFAULT 0
+                    trade_ad_score REAL NOT NULL DEFAULT 0,
+                    trade_ad_archived_at TEXT
                 );
                 CREATE TABLE IF NOT EXISTS rolimons_trade_ads (
                     ad_id INTEGER PRIMARY KEY,
@@ -254,6 +255,7 @@ class Database:
             self._ensure_column(connection, "watched_users", "last_trade_ad_at", "TEXT")
             self._ensure_column(connection, "watched_users", "trade_ad_admitted", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(connection, "watched_users", "trade_ad_score", "REAL NOT NULL DEFAULT 0")
+            self._ensure_column(connection, "watched_users", "trade_ad_archived_at", "TEXT")
             self._ensure_column(
                 connection,
                 "item_value_observations",
@@ -951,19 +953,26 @@ class Database:
         lower_value = weighted_quantile(weighted, 0.2)
         upper_value = weighted_quantile(weighted, 0.8)
         showcase_value = weighted_quantile(showcase_weighted, 0.5)
+        showcase_lower_value = weighted_quantile(showcase_weighted, 0.2)
+        showcase_upper_value = weighted_quantile(showcase_weighted, 0.8)
         direct_count = len(direct)
         peer_count = 0 if use_direct_only else len(peers)
         uncertainty_pct = round((upper_value - lower_value) / baseline * 100, 2)
+        showcase_uncertainty_pct = round(
+            (showcase_upper_value - showcase_lower_value) / baseline * 100, 2
+        )
         # Sparse peer estimates with a wide range are useful diagnostics, but
-        # are not safe effective-value overrides yet.
-        if not use_direct_only and uncertainty_pct > 25:
+        # are not safe effective-value overrides yet. Test the uncompressed
+        # proof distribution so selection-bias shrinkage cannot manufacture
+        # eligibility by making a genuinely wide range appear certain.
+        if not use_direct_only and showcase_uncertainty_pct > 25:
             return None
         source = "direct implied trades" if use_direct_only else (
             "direct + similar-value peers" if direct_count else "similar-value peers"
         )
         confidence = (
-            "high" if use_direct_only and uncertainty_pct <= 15
-            else "medium" if direct_count or uncertainty_pct <= 10
+            "high" if use_direct_only and showcase_uncertainty_pct <= 15
+            else "medium" if direct_count or showcase_uncertainty_pct <= 10
             else "low"
         )
         total_weight = sum(weight for _, weight in weighted)
@@ -1006,6 +1015,9 @@ class Database:
             "lower_value": lower_value,
             "upper_value": upper_value,
             "uncertainty_pct": uncertainty_pct,
+            "showcase_lower_value": showcase_lower_value,
+            "showcase_upper_value": showcase_upper_value,
+            "showcase_uncertainty_pct": showcase_uncertainty_pct,
             "confidence": confidence,
             "average_raw_adjustment": average_raw_adjustment,
             "average_structural_compensation": average_structural_compensation,
@@ -1113,7 +1125,7 @@ class Database:
                     "SELECT COUNT(user_id) FROM watched_users WHERE last_trade_ad_at IS NOT NULL AND trade_ad_admitted=0"
                 ),
                 "archived_trade_ad_users": count(
-                    "SELECT COUNT(user_id) FROM watched_users WHERE enabled=0 AND last_trade_ad_at IS NOT NULL"
+                    "SELECT COUNT(user_id) FROM watched_users WHERE trade_ad_archived_at IS NOT NULL"
                 ),
                 "rolimons_trade_ads_24h": count(
                     "SELECT COUNT(ad_id) FROM rolimons_trade_ads WHERE created_at>=?",
@@ -1293,6 +1305,7 @@ class Database:
                     ON CONFLICT(user_id) DO UPDATE SET
                         username=excluded.username,
                         last_trade_ad_at=MAX(COALESCE(watched_users.last_trade_ad_at, excluded.last_trade_ad_at), excluded.last_trade_ad_at),
+                        trade_ad_archived_at=NULL,
                         source=CASE WHEN watched_users.source IN
                             ('active_transfer', 'proof', 'manual', 'cli')
                             THEN watched_users.source ELSE 'trade_ad' END
@@ -1428,11 +1441,12 @@ class Database:
         with self.connect() as connection:
             cursor = connection.execute(
                 """
-                UPDATE watched_users SET enabled=0, poll_priority=0
+                UPDATE watched_users SET enabled=0, poll_priority=0,
+                    trade_ad_archived_at=?
                 WHERE enabled=1 AND source='trade_ad'
                   AND last_trade_ad_at IS NOT NULL AND last_trade_ad_at < ?
                 """,
-                (cutoff,),
+                (datetime.now(UTC).isoformat(), cutoff),
             )
             connection.commit()
         return int(cursor.rowcount)

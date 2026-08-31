@@ -5,7 +5,7 @@ from typing import Protocol, Sequence
 
 import requests
 
-from config import DEMAND_NAMES, ROLIMONS_ITEM_ENDPOINTS
+from config import DEMAND_NAMES, ROLIMONS_ITEM_ENDPOINTS, TREND_NAMES
 from models import ItemSnapshot
 
 
@@ -164,6 +164,12 @@ class RolimonsClient:
             demand_score = -1
         if demand_score not in DEMAND_NAMES:
             demand_score = -1
+        try:
+            trend_score = int(raw[6])
+        except (TypeError, ValueError):
+            trend_score = -1
+        if trend_score not in TREND_NAMES:
+            trend_score = -1
 
         return ItemSnapshot(
             asset_id=int(asset_id),
@@ -176,6 +182,8 @@ class RolimonsClient:
             demand_score=demand_score,
             projected=(raw[7] == 1),
             rare=(raw[9] == 1),
+            trend_name=TREND_NAMES.get(trend_score, "none"),
+            trend_score=trend_score,
         )
 
     def post_trade_ad(

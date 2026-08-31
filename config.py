@@ -38,7 +38,7 @@ ROBLOX_USER_ID = _optional_positive_int_env("ROBLOX_USER_ID")
 INVENTORY_POLL_INTERVAL_SECONDS = int(
     os.getenv("INVENTORY_POLL_INTERVAL_SECONDS", "300")
 )
-WATCHED_USER_POLL_BUDGET = int(os.getenv("WATCHED_USER_POLL_BUDGET", "3"))
+WATCHED_USER_POLL_BUDGET = int(os.getenv("WATCHED_USER_POLL_BUDGET", "5"))
 WATCHED_USER_REQUEST_DELAY_SECONDS = float(
     os.getenv("WATCHED_USER_REQUEST_DELAY_SECONDS", "10")
 )
@@ -49,9 +49,9 @@ WATCHED_USER_FAILURE_RETRY_SECONDS = int(
     os.getenv("WATCHED_USER_FAILURE_RETRY_SECONDS", "3600")
 )
 TRADE_AD_HOT_WINDOW_SECONDS = int(os.getenv("TRADE_AD_HOT_WINDOW_SECONDS", "21600"))
-TRADE_AD_HOT_POLL_SECONDS = int(os.getenv("TRADE_AD_HOT_POLL_SECONDS", "1800"))
+TRADE_AD_HOT_POLL_SECONDS = int(os.getenv("TRADE_AD_HOT_POLL_SECONDS", "21600"))
 TRADE_AD_WARM_WINDOW_SECONDS = int(os.getenv("TRADE_AD_WARM_WINDOW_SECONDS", "259200"))
-TRADE_AD_WARM_POLL_SECONDS = int(os.getenv("TRADE_AD_WARM_POLL_SECONDS", "21600"))
+TRADE_AD_WARM_POLL_SECONDS = int(os.getenv("TRADE_AD_WARM_POLL_SECONDS", "43200"))
 TRADE_AD_ACTIVE_WINDOW_SECONDS = int(os.getenv("TRADE_AD_ACTIVE_WINDOW_SECONDS", "2592000"))
 TRADE_AD_ACTIVE_POLL_SECONDS = int(os.getenv("TRADE_AD_ACTIVE_POLL_SECONDS", "86400"))
 TRADE_AD_COLD_POLL_SECONDS = int(os.getenv("TRADE_AD_COLD_POLL_SECONDS", "604800"))
@@ -87,7 +87,7 @@ ROLIMONS_TRADE_AD_MAX_PRIORITY_ASSETS = int(
     os.getenv("ROLIMONS_TRADE_AD_MAX_PRIORITY_ASSETS", "200")
 )
 INFERRED_TRADE_WINDOW_SECONDS = int(
-    os.getenv("INFERRED_TRADE_WINDOW_SECONDS", "600")
+    os.getenv("INFERRED_TRADE_WINDOW_SECONDS", "21600")
 )
 INVENTORY_REQUEST_TIMEOUT = float(os.getenv("INVENTORY_REQUEST_TIMEOUT", "15"))
 OWNER_SWEEP_PAGE_BUDGET = int(os.getenv("OWNER_SWEEP_PAGE_BUDGET", "10"))
@@ -173,11 +173,7 @@ RARE_RECEIVE_UNCERTAINTY_PENALTY = 4.0
 
 # Temporary stand-in for the market-value database you plan to build later.
 ESTIMATED_VALUES: dict[int, int] = {
-    583721561: 14999,
-    10159622004: 13200,
-    16477149823: 9500,
-    19027209: 6600,
-    46357082: 41000,
+
 }
 
 DEMAND_NAMES = {
@@ -188,6 +184,27 @@ DEMAND_NAMES = {
     3: "high",
     4: "amazing",
 }
+TREND_NAMES = {
+    -1: "none",
+    0: "lowering",
+    1: "unstable",
+    2: "stable",
+    3: "raising",
+    4: "fluctuating",
+}
+
+# Guarded RAP/value adjustment for assigned-value items with demand >= Normal
+# and a usable Lowering/Stable/Raising trend. Trend is deliberately secondary
+# because Rolimon's may update it more slowly than RAP.
+RAP_VALUE_BAD_RATIO = float(os.getenv("RAP_VALUE_BAD_RATIO", "0.83"))
+RAP_VALUE_DECENT_RATIO = float(os.getenv("RAP_VALUE_DECENT_RATIO", "0.90"))
+RAP_VALUE_GOOD_RATIO = float(os.getenv("RAP_VALUE_GOOD_RATIO", "0.95"))
+RAP_VALUE_RAISING_RATIO = float(os.getenv("RAP_VALUE_RAISING_RATIO", "0.97"))
+RAP_VALUE_BAD_MULTIPLIER = float(os.getenv("RAP_VALUE_BAD_MULTIPLIER", "0.90"))
+RAP_VALUE_DECENT_MULTIPLIER = float(os.getenv("RAP_VALUE_DECENT_MULTIPLIER", "0.95"))
+RAP_VALUE_GOOD_MULTIPLIER = float(os.getenv("RAP_VALUE_GOOD_MULTIPLIER", "0.98"))
+RAP_VALUE_LOWERING_EXTRA_PENALTY = float(os.getenv("RAP_VALUE_LOWERING_EXTRA_PENALTY", "0.02"))
+RAP_VALUE_RAISING_MAX_BONUS = float(os.getenv("RAP_VALUE_RAISING_MAX_BONUS", "0.02"))
 
 ROLIMONS_ITEM_ENDPOINTS = (
     "https://api.rolimons.com/items/v2/itemdetails",
